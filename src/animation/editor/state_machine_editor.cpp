@@ -266,13 +266,13 @@ void Node::onGUI()
 	if (!engine_cmp) return;
 	auto* engine_node = ((Anim::Node*)engine_cmp);
 
-	onGuiEvents(engine_node->enter_events, "Enter Events");
-	onGuiEvents(engine_node->exit_events, "Exit Events");
-	onGuiEvents(engine_node->runtime_events, "Runtime Events");
+	onGuiEvents(engine_node->enter_events, "Enter Events", false);
+	onGuiEvents(engine_node->exit_events, "Exit Events", false);
+	onGuiEvents(engine_node->runtime_events, "Runtime Events", true);
 }
 
 
-void Node::onGuiEvents(Anim::EventArray& events, const char* label)
+void Node::onGuiEvents(Anim::EventArray& events, const char* label, bool show_time)
 {
 	if (!ImGui::CollapsingHeader(label)) return;
 	ImGui::PushID(label);
@@ -280,7 +280,7 @@ void Node::onGuiEvents(Anim::EventArray& events, const char* label)
 	auto& editor = m_controller.getEditor();
 	for (int i = 0; i < events.count; ++i)
 	{
-		auto& header = *(Anim::EnterExitEventHeader*)&events.data[sizeof(Anim::EnterExitEventHeader) * i];
+		auto& header = *(Anim::EventHeader*)&events.data[sizeof(Anim::EventHeader) * i];
 		const char* event_type_name = getEventTypeName(header.type, editor);
 		if (ImGui::TreeNode((void*)(uintptr)i, "%s", event_type_name))
 		{
@@ -290,7 +290,11 @@ void Node::onGuiEvents(Anim::EventArray& events, const char* label)
 				ImGui::TreePop();
 				break;
 			}
-			int event_offset = header.offset + sizeof(Anim::EnterExitEventHeader) * events.count;
+			int event_offset = header.offset + sizeof(Anim::EventHeader) * events.count;
+			if (show_time)
+			{
+				ImGui::InputFloat("Time", &header.time);
+			}
 			editor.getEventType(header.type).editor.invoke(&events.data[event_offset], *this);
 			ImGui::TreePop();
 		}

@@ -146,7 +146,7 @@ RayCastModelHit Model::castRay(const Vec3& origin, const Vec3& dir, const Matrix
 	Matrix inv = model_transform;
 	inv.inverse();
 	Vec3 local_origin = inv.transformPoint(origin);
-	Vec3 local_dir = static_cast<Vec3>(inv * Vec4(dir.x, dir.y, dir.z, 0));
+	Vec3 local_dir = (inv * Vec4(dir.x, dir.y, dir.z, 0)).xyz();
 
 	Matrix matrices[256];
 	ASSERT(!pose || pose->count <= lengthOf(matrices));
@@ -567,7 +567,7 @@ bool Model::parseMeshes(const bgfx::VertexDecl& global_vertex_decl, FS::IFile& f
 		int index_size;
 		int indices_count;
 		file.read(&index_size, sizeof(index_size));
-		if (index_size != 2 && index_size != 0) return false;
+		if (index_size != 2 && index_size != 4) return false;
 		file.read(&indices_count, sizeof(indices_count));
 		if (indices_count <= 0) return false;
 		mesh.indices.resize(index_size * indices_count);
@@ -586,7 +586,6 @@ bool Model::parseMeshes(const bgfx::VertexDecl& global_vertex_decl, FS::IFile& f
 		file.read(&data_size, sizeof(data_size));
 		const bgfx::Memory* vertices_mem = bgfx::alloc(data_size);
 		file.read(vertices_mem->data, vertices_mem->size);
-		mesh.vertex_buffer_handle = bgfx::createVertexBuffer(vertices_mem, mesh.vertex_decl);
 
 		const bgfx::VertexDecl& vertex_decl = mesh.vertex_decl;
 		int position_attribute_offset = vertex_decl.getOffset(bgfx::Attrib::Position);
@@ -615,6 +614,7 @@ bool Model::parseMeshes(const bgfx::VertexDecl& global_vertex_decl, FS::IFile& f
 			mesh.vertices[j] = *(const Vec3*)&vertices[offset + position_attribute_offset];
 			mesh.uvs[j] = *(const Vec2*)&vertices[offset + uv_attribute_offset];
 		}
+		mesh.vertex_buffer_handle = bgfx::createVertexBuffer(vertices_mem, mesh.vertex_decl);
 	}
 	file.read(&m_bounding_radius, sizeof(m_bounding_radius));
 	file.read(&m_aabb, sizeof(m_aabb));
@@ -920,4 +920,4 @@ void Model::unload()
 }
 
 
-} // ~namespace Lumix
+} // namespace Lumix

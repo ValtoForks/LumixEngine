@@ -32,6 +32,7 @@
 #include "renderer/texture.h"
 #include <cfloat>
 #include <cmath>
+#include <algorithm>
 
 
 namespace Lumix
@@ -164,21 +165,65 @@ struct BoneAttachment
 
 struct TextMesh
 {
-	TextMesh(IAllocator& allocator) : text("", allocator) {}
-	~TextMesh()
+	enum Flags : u32
 	{
-		if (font_resource)
+		CAMERA_ORIENTED = 1 << 0
+	};
+	
+	TextMesh(IAllocator& allocator) : text("", allocator) {}
+	~TextMesh() { setFontResource(nullptr); }
+
+	void setFontResource(FontResource* res)
+	{
+		if (m_font_resource)
 		{
-			font_resource->removeRef(*font);
-			font_resource->getResourceManager().unload(*font_resource);
+			if (m_font)
+			{
+				m_font_resource->removeRef(*m_font);
+				m_font = nullptr;
+			}
+			m_font_resource->getObserverCb().unbind<TextMesh, &TextMesh::onFontLoaded>(this);
+			m_font_resource->getResourceManager().unload(*m_font_resource);
+		}
+		m_font_resource = res;
+		if (res) res->onLoaded<TextMesh, &TextMesh::onFontLoaded>(this); 
+	}
+
+	void onFontLoaded(Resource::State, Resource::State new_state, Resource&)
+	{
+		if (new_state != Resource::State::READY)
+		{
+			m_font = nullptr;
+		}
+		else
+		{
+			m_font = m_font_resource->addRef(m_font_size);
 		}
 	}
 
-	FontResource* font_resource = nullptr;
-	Font* font = nullptr;
+	void setFontSize(int value)
+	{
+		m_font_size = value;
+		if (m_font_resource && m_font_resource->isReady())
+		{
+			if(m_font) m_font_resource->removeRef(*m_font);
+			m_font = m_font_resource->addRef(m_font_size);
+		}
+	}
+
+	FontResource* getFontResource() const { return m_font_resource; }
+	Font* getFont() const { return m_font; }
+	int getFontSize() const { return m_font_size; }
+
 	string text;
-	int font_size = 13;
 	u32 color = 0xff000000;
+	FlagSet<Flags, u32> m_flags;
+
+private:
+	int m_font_size = 13;
+	Font* m_font = nullptr;
+	FontResource* m_font_resource = nullptr;
+
 };
 
 
@@ -239,7 +284,11 @@ public:
 		auto* material_manager = static_cast<MaterialManager*>(rm.get(Material::TYPE));
 
 		m_model_loaded_callbacks.clear();
-
+		
+		for (TextMesh* text_mesh : m_text_meshes)
+		{
+			LUMIX_DELETE(m_allocator, text_mesh);
+		}
 		m_text_meshes.clear();
 
 		for (Decal& decal : m_decals)
@@ -369,7 +418,7 @@ public:
 		Vec4 p1 = inverted * Vec4(nx, ny, 1, 1);
 		p0 *= 1 / p0.w;
 		p1 *= 1 / p1.w;
-		dir = p1 - p0;
+		dir = (p1 - p0).xyz();
 		dir.normalize();
 	}
 
@@ -557,10 +606,10 @@ public:
 	void setBoneAttachmentParent(Entity entity, Entity parent) override
 	{
 		BoneAttachment& ba = m_bone_attachments[entity];
-		ba.parent_entity = entity;
-		if (entity.isValid() && entity.index < m_model_instances.size())
+		ba.parent_entity = parent;
+		if (parent.isValid() && parent.index < m_model_instances.size())
 		{
-			ModelInstance& mi = m_model_instances[entity.index];
+			ModelInstance& mi = m_model_instances[parent.index];
 			mi.flags.set(ModelInstance::IS_BONE_ATTACHMENT_PARENT);
 		}
 		updateRelativeMatrix(ba);
@@ -836,39 +885,50 @@ public:
 
 	void serializeTextMesh(ISerializer& serializer, Entity entity)
 	{
-		TextMesh& text = m_text_meshes.get(entity);
-		serializer.write("font", text.font_resource ? text.font_resource->getPath().c_str() : "");
+		TextMesh& text = *m_text_meshes.get(entity);
+		serializer.write("font", text.getFontResource() ? text.getFontResource()->getPath().c_str() : "");
 		serializer.write("color", text.color);
-		serializer.write("font_size", text.font_size);
+		serializer.write("font_size", text.getFontSize());
 		serializer.write("text", text.text.c_str());
 	}
 
 
 	void setTextMeshText(Entity entity, const char* text) override
 	{
-		m_text_meshes.get(entity).text = text;
+		m_text_meshes.get(entity)->text = text;
 	}
 
 
 	const char* getTextMeshText(Entity entity) override
 	{
-		return m_text_meshes.get(entity).text.c_str();
+		return m_text_meshes.get(entity)->text.c_str();
+	}
+
+
+	bool isTextMeshCameraOriented(Entity entity) override
+	{
+		TextMesh& text = *m_text_meshes.get(entity);
+		return text.m_flags.isSet(TextMesh::CAMERA_ORIENTED);
+	}
+
+
+	void setTextMeshCameraOriented(Entity entity, bool is_oriented) override
+	{
+		TextMesh& text = *m_text_meshes.get(entity);
+		text.m_flags.set(TextMesh::CAMERA_ORIENTED, is_oriented);
 	}
 
 
 	void setTextMeshFontSize(Entity entity, int value) override
 	{
-		TextMesh& text = m_text_meshes.get(entity);
-		FontResource* res = text.font_resource;
-		if (res) res->removeRef(*text.font);
-		text.font_size = value;
-		if (res) text.font = res->addRef(text.font_size);
+		TextMesh& text = *m_text_meshes.get(entity);
+		text.setFontSize(value);
 	}
 
 
 	int getTextMeshFontSize(Entity entity) override
 	{
-		return m_text_meshes.get(entity).font_size;
+		return m_text_meshes.get(entity)->getFontSize();
 	}
 
 
@@ -896,28 +956,33 @@ public:
 
 	Vec4 getTextMeshColorRGBA(Entity entity) override
 	{
-		return ABGRu32ToRGBAVec4(m_text_meshes.get(entity).color);
+		return ABGRu32ToRGBAVec4(m_text_meshes.get(entity)->color);
 	}
 
 
 	void setTextMeshColorRGBA(Entity entity, const Vec4& color) override
 	{
-		m_text_meshes.get(entity).color = RGBAVec4ToABGRu32(color);
+		m_text_meshes.get(entity)->color = RGBAVec4ToABGRu32(color);
 	}
 
 
 	Path getTextMeshFontPath(Entity entity) override
 	{
-		TextMesh& text = m_text_meshes.get(entity);
-		return text.font_resource == nullptr ? Path() : text.font_resource->getPath();
+		TextMesh& text = *m_text_meshes.get(entity);
+		return text.getFontResource() == nullptr ? Path() : text.getFontResource()->getPath();
 	}
 
 
-	void getTextMeshesVertices(Array<TextMeshVertex>& vertices) override
+	void getTextMeshesVertices(Array<TextMeshVertex>& vertices, Entity camera) override
 	{
+		Matrix camera_mtx = m_universe.getMatrix(camera);
+		Vec3 cam_right = camera_mtx.getXVector();
+		Vec3 cam_up = -camera_mtx.getYVector();
 		for (int j = 0, nj = m_text_meshes.size(); j < nj; ++j)
 		{
-			TextMesh& text = m_text_meshes.at(j);
+			TextMesh& text = *m_text_meshes.at(j);
+			Font* font = text.getFont();
+			if (!font) font = m_renderer.getFontManager().getDefaultFont();
 			Entity entity = m_text_meshes.getKey(j);
 			const char* str = text.text.c_str();
 			Vec3 base = m_universe.getPosition(entity);
@@ -925,13 +990,18 @@ public:
 			float scale = m_universe.getScale(entity);
 			Vec3 right = rot.rotate({ 1, 0, 0 }) * scale;
 			Vec3 up = rot.rotate({ 0, -1, 0 }) * scale;
+			if (text.m_flags.isSet(TextMesh::CAMERA_ORIENTED))
+			{
+				right = cam_right;
+				up = cam_up;
+			}
 			u32 color = text.color;
-			Vec2 text_size = text.font->CalcTextSizeA((float)text.font_size, FLT_MAX, 0, str);
+			Vec2 text_size = font->CalcTextSizeA((float)text.getFontSize(), FLT_MAX, 0, str);
 			base += right * text_size.x * -0.5f;
 			base += up * text_size.y * -0.5f;
 			for (int i = 0, n = text.text.length(); i < n; ++i)
 			{
-				const Font::Glyph* glyph = text.font->FindGlyph(str[i]);
+				const Font::Glyph* glyph = font->FindGlyph(str[i]);
 				if (!glyph) continue;
 
 				Vec3 x0y0 = base + right * glyph->X0 + up * glyph->Y0;
@@ -956,46 +1026,28 @@ public:
 
 	void setTextMeshFontPath(Entity entity, const Path& path) override
 	{
-		TextMesh& text = m_text_meshes.get(entity);
-		FontResource* res = text.font_resource;
-		if (res)
-		{
-			res->removeRef(*text.font);
-			res->getResourceManager().unload(*res);
-		}
+		TextMesh& text = *m_text_meshes.get(entity);
 		FontManager& manager = m_renderer.getFontManager();
-		if (!path.isValid())
-		{
-			text.font_resource = nullptr;
-			text.font = manager.getDefaultFont();
-			return;
-		}
-		text.font_resource = (FontResource*)manager.load(path);
-		text.font = text.font_resource->addRef(text.font_size);
+		FontResource* res = path.isValid() ? (FontResource*)manager.load(path) : nullptr;
+		text.setFontResource(res);
 	}
 
 	
 	void deserializeTextMesh(IDeserializer& serializer, Entity entity, int /*scene_version*/)
 	{
-		TextMesh& text = m_text_meshes.emplace(entity, m_allocator);
+		TextMesh& text = *LUMIX_NEW(m_allocator, TextMesh)(m_allocator);
+		m_text_meshes.insert(entity, &text);
 
 		char tmp[MAX_PATH_LENGTH];
 		serializer.read(tmp, lengthOf(tmp));
 		serializer.read(&text.color);
-		serializer.read(&text.font_size);
+		int font_size;
+		serializer.read(&font_size);
+		text.setFontSize(font_size);
 		serializer.read(&text.text);
 		FontManager& manager = m_renderer.getFontManager();
-		if (tmp[0] == '\0')
-		{
-			text.font_resource = nullptr;
-			text.font = manager.getDefaultFont();
-		}
-		else
-		{
-			text.font_resource = (FontResource*)manager.load(Path(tmp));
-			text.font = text.font_resource->addRef(text.font_size);
-		}
-
+		FontResource* res = tmp[0] ? (FontResource*)manager.load(Path(tmp)) : nullptr;
+		text.setFontResource(res);
 		m_universe.onComponentCreated(entity, TEXT_MESH_TYPE, this);
 	}
 
@@ -1535,12 +1587,12 @@ public:
 		serializer.write(m_text_meshes.size());
 		for (int i = 0, n = m_text_meshes.size(); i < n; ++i)
 		{
-			TextMesh& text = m_text_meshes.at(i);
+			TextMesh& text = *m_text_meshes.at(i);
 			Entity e = m_text_meshes.getKey(i);
 			serializer.write(e);
-			serializer.writeString(text.font_resource ? text.font_resource->getPath().c_str() : "");
+			serializer.writeString(text.getFontResource() ? text.getFontResource()->getPath().c_str() : "");
 			serializer.write(text.color);
-			serializer.write(text.font_size);
+			serializer.write(text.getFontSize());
 			serializer.write(text.text);
 		}
 	}
@@ -1554,22 +1606,17 @@ public:
 		{
 			Entity e;
 			serializer.read(e);
-			TextMesh& text = m_text_meshes.emplace(e, m_allocator);
+			TextMesh& text = *LUMIX_NEW(m_allocator, TextMesh)(m_allocator);
+			m_text_meshes.insert(e, &text);
 			char tmp[MAX_PATH_LENGTH];
 			serializer.readString(tmp, lengthOf(tmp));
 			serializer.read(text.color);
-			serializer.read(text.font_size);
+			int font_size;
+			serializer.read(font_size);
+			text.setFontSize(font_size);
 			serializer.read(text.text);
-			if (tmp[0] == '\0')
-			{
-				text.font_resource = nullptr;
-				text.font = manager.getDefaultFont();
-			}
-			else
-			{
-				text.font_resource = (FontResource*)manager.load(Path(tmp));
-				text.font = text.font_resource->addRef(text.font_size);
-			}
+			FontResource* res = tmp[0] ? (FontResource*)manager.load(Path(tmp)) : nullptr;
+			text.setFontResource(res);
 			m_universe.onComponentCreated(e, TEXT_MESH_TYPE, this);
 		}
 	}
@@ -1997,6 +2044,8 @@ public:
 
 	void destroyTextMesh(Entity entity)
 	{
+		TextMesh* text = m_text_meshes[entity];
+		LUMIX_DELETE(m_allocator, text);
 		m_text_meshes.erase(entity);
 		m_universe.onComponentDestroyed(entity, TEXT_MESH_TYPE, this);
 	}
@@ -2474,8 +2523,8 @@ public:
 
 	void createTextMesh(Entity entity)
 	{
-		TextMesh& text = m_text_meshes.emplace(entity, m_allocator);
-		text.font = m_renderer.getFontManager().getDefaultFont();
+		TextMesh* text = LUMIX_NEW(m_allocator, TextMesh)(m_allocator);
+		m_text_meshes.insert(entity, text);
 		m_universe.onComponentCreated(entity, TEXT_MESH_TYPE, this);
 	}
 
@@ -3564,10 +3613,23 @@ public:
 						info.depth = squared_distance;
 					}
 				}
+				if (!subinfos.empty())
+				{
+					PROFILE_BLOCK("Sort");
+					MeshInstance* begin = &subinfos[0];
+					MeshInstance* end = begin + subinfos.size();
+
+					auto cmp = [](const MeshInstance& a, const MeshInstance& b) -> bool {
+						return (a.depth < b.depth);
+					};
+					std::sort(begin, end, cmp);
+				}
 			}, &job_storage[subresult_index], &jobs[subresult_index], nullptr);
 		}
 		JobSystem::runJobs(jobs, results.size(), &counter);
 		JobSystem::wait(&counter);
+
+		
 
 		return m_temporary_infos;
 	}
@@ -4417,9 +4479,14 @@ public:
 		auto& probe = m_environment_probes[entity];
 		auto* texture_manager = m_engine.getResourceManager().get(Texture::TYPE);
 		if (probe.texture) texture_manager->unload(*probe.texture);
-		StaticString<MAX_PATH_LENGTH> path("universes/", m_universe.getName(), "/probes/", probe.guid, ".dds");
-		probe.texture = static_cast<Texture*>(texture_manager->load(Path(path)));
-		probe.texture->setFlag(BGFX_TEXTURE_SRGB, true);
+		probe.texture = nullptr;
+		StaticString<MAX_PATH_LENGTH> path;
+		if (probe.flags.isSet(EnvironmentProbe::REFLECTION))
+		{
+			path  << "universes/" << m_universe.getName() << "/probes/" << probe.guid << ".dds";
+			probe.texture = static_cast<Texture*>(texture_manager->load(Path(path)));
+			probe.texture->setFlag(BGFX_TEXTURE_SRGB, true);
+		}
 		path = "universes/";
 		path << m_universe.getName() << "/probes/" << probe.guid << "_irradiance.dds";
 		probe.irradiance = static_cast<Texture*>(texture_manager->load(Path(path)));
@@ -5164,7 +5231,7 @@ private:
 	HashMap<Entity, GlobalLight> m_global_lights;
 	Array<PointLight> m_point_lights;
 	HashMap<Entity, Camera> m_cameras;
-	AssociativeArray<Entity, TextMesh> m_text_meshes;
+	AssociativeArray<Entity, TextMesh*> m_text_meshes;
 	AssociativeArray<Entity, BoneAttachment> m_bone_attachments;
 	AssociativeArray<Entity, EnvironmentProbe> m_environment_probes;
 	HashMap<Entity, Terrain*> m_terrains;

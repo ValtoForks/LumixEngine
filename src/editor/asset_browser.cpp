@@ -128,11 +128,7 @@ AssetBrowser::~AssetBrowser()
 	}
 	m_file_infos.clear();
 
-	for (auto* plugin : m_plugins)
-	{
-		LUMIX_DELETE(m_editor.getAllocator(), plugin);
-	}
-	m_plugins.clear();
+	ASSERT(m_plugins.size() == 0);
 
 	FileSystemWatcher::destroy(m_watchers[0]);
 	FileSystemWatcher::destroy(m_watchers[1]);
@@ -530,6 +526,8 @@ void AssetBrowser::detailsGUI()
 		IPlugin* plugin = m_plugins.get(resource_type);
 		if (m_selected_resource->isReady()) plugin->onGUI(m_selected_resource);
 	}
+	if (m_activate) ImGui::SetDockActive();
+	m_activate = false;
 	ImGui::EndDock();
 }
 
@@ -549,7 +547,6 @@ void AssetBrowser::onGUI()
 	if (!ImGui::BeginDock("Assets", &m_is_open))
 	{
 		if (m_activate) ImGui::SetDockActive();
-		m_activate = false;
 		ImGui::EndDock();
 		detailsGUI();
 		return;
@@ -560,7 +557,6 @@ void AssetBrowser::onGUI()
 		ImGui::SetWindowFocus();
 	}
 	if (m_activate) ImGui::SetDockActive();
-	m_activate = false;
 
 	float checkbox_w = ImGui::GetCursorPosX();
 	ImGui::Checkbox("Thumbnails", &m_show_thumbnails);
@@ -620,6 +616,13 @@ void AssetBrowser::onInitFinished()
 {
 	m_is_init_finished = true;
 	findResources();
+}
+
+
+void AssetBrowser::removePlugin(IPlugin& plugin)
+{
+	m_plugins.erase(plugin.getResourceType());
+	if (m_is_init_finished) findResources();
 }
 
 

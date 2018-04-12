@@ -2,13 +2,17 @@
 
 #include "editor/asset_browser.h"
 #include "editor/gizmo.h"
+#include "editor/platform_interface.h"
 #include "editor/property_grid.h"
 #include "editor/studio_app.h"
 #include "editor/utils.h"
 #include "editor/world_editor.h"
 #include "engine/crc32.h"
+#include "engine/log.h"
 #include "engine/math_utils.h"
+#include "engine/path_utils.h"
 #include "engine/reflection.h"
+#include "engine/system.h"
 #include "engine/universe/universe.h"
 #include "physics/physics_geometry_manager.h"
 #include "physics/physics_scene.h"
@@ -43,9 +47,9 @@ physx::PxQuat toPhysx(const Quat& v) { return physx::PxQuat(v.x, v.y, v.z, v.w);
 RigidTransform fromPhysx(const physx::PxTransform& v) { return{ fromPhysx(v.p), fromPhysx(v.q) }; }
 
 
-struct EditorPlugin LUMIX_FINAL : public WorldEditor::Plugin
+struct GizmoPlugin LUMIX_FINAL : public WorldEditor::Plugin
 {
-	explicit EditorPlugin(WorldEditor& editor)
+	explicit GizmoPlugin(WorldEditor& editor)
 		: m_editor(editor)
 	{
 	}
@@ -411,18 +415,48 @@ struct EditorPlugin LUMIX_FINAL : public WorldEditor::Plugin
 };
 
 
-struct StudioAppPlugin LUMIX_FINAL : public StudioApp::IPlugin
+struct PhysicsUIPlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 {
-	explicit StudioAppPlugin(StudioApp& app)
+	explicit PhysicsUIPlugin(StudioApp& app)
 		: m_editor(app.getWorldEditor())
 		, m_selected_bone(-1)
 		, m_is_window_open(false)
 	{
 		Action* action = LUMIX_NEW(m_editor.getAllocator(), Action)("Physics", "Toggle physics UI", "physics");
-		action->func.bind<StudioAppPlugin, &StudioAppPlugin::onAction>(this);
-		action->is_selected.bind<StudioAppPlugin, &StudioAppPlugin::isOpen>(this);
+		action->func.bind<PhysicsUIPlugin, &PhysicsUIPlugin::onAction>(this);
+		action->is_selected.bind<PhysicsUIPlugin, &PhysicsUIPlugin::isOpen>(this);
 		app.addWindowAction(action);
 	}
+
+
+	bool packData(const char* dest_dir) override
+	{
+		char exe_path[MAX_PATH_LENGTH];
+		getExecutablePath(exe_path, lengthOf(exe_path));
+		char exe_dir[MAX_PATH_LENGTH];
+
+		const char* physx_dlls[] = {
+			"nvToolsExt64_1.dll",
+			"PhysX3CharacterKinematicCHECKED_x64.dll",
+			"PhysX3CHECKED_x64.dll",
+			"PhysX3CommonCHECKED_x64.dll",
+			"PhysX3CookingCHECKED_x64.dll",
+		};
+		for (const char* dll : physx_dlls)
+		{
+			PathUtils::getDir(exe_dir, lengthOf(exe_dir), exe_path);
+			StaticString<MAX_PATH_LENGTH> tmp(exe_dir, dll);
+			if (!PlatformInterface::fileExists(tmp)) return false;
+			StaticString<MAX_PATH_LENGTH> dest(dest_dir, dll);
+			if (!copyFile(tmp, dest))
+			{
+				g_log_error.log("Physics") << "Failed to copy " << tmp << " to " << dest;
+				return false;
+			}
+		}
+		return true; 
+	}
+
 
 
 	const char* getName() const override { return "physics"; }
@@ -537,19 +571,19 @@ struct StudioAppPlugin LUMIX_FINAL : public StudioApp::IPlugin
 				{
 					case physx::PxJointConcreteType::eDISTANCE:
 						cmp.type = DISTANCE_JOINT_TYPE;
-						EditorPlugin::showDistanceJointGizmo(cmp);
+						GizmoPlugin::showDistanceJointGizmo(cmp);
 						break;
 					case physx::PxJointConcreteType::eREVOLUTE:
 						cmp.type = HINGE_JOINT_TYPE;
-						EditorPlugin::showHingeJointGizmo(cmp);
+						GizmoPlugin::showHingeJointGizmo(cmp);
 						break;
 					case physx::PxJointConcreteType::eSPHERICAL:
 						cmp.type = SPHERICAL_JOINT_TYPE;
-						EditorPlugin::showSphericalJointGizmo(cmp);
+						GizmoPlugin::showSphericalJointGizmo(cmp);
 						break;
 					case physx::PxJointConcreteType::eD6:
 						cmp.type = D6_JOINT_TYPE;
-						EditorPlugin::showD6JointGizmo(m_editor.getUniverse()->getTransform(cmp.entity).getRigidPart(),
+						GizmoPlugin::showD6JointGizmo(m_editor.getUniverse()->getTransform(cmp.entity).getRigidPart(),
 							*render_scene,
 							static_cast<physx::PxD6Joint*>(joint));
 						break;
@@ -560,12 +594,12 @@ struct StudioAppPlugin LUMIX_FINAL : public StudioApp::IPlugin
 				char tmp[256];
 				getEntityListDisplayName(m_editor, tmp, lengthOf(tmp), cmp.entity);
 				bool b = false;
-				if (ImGui::Selectable(tmp, &b)) m_editor.selectEntities(&cmp.entity, 1);
+				if (ImGui::Selectable(tmp, &b)) m_editor.selectEntities(&cmp.entity, 1, false);
 				ImGui::NextColumn();
 
 				Entity other_entity = scene->getJointConnectedBody(cmp.entity);
 				getEntityListDisplayName(m_editor, tmp, lengthOf(tmp), other_entity);
-				if (other_entity.isValid() && ImGui::Selectable(tmp, &b)) m_editor.selectEntities(&other_entity, 1);
+				if (other_entity.isValid() && ImGui::Selectable(tmp, &b)) m_editor.selectEntities(&other_entity, 1, false);
 				ImGui::NextColumn();
 				ImGui::PopID();
 			}
@@ -636,7 +670,7 @@ struct StudioAppPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			char tmp[255];
 			getEntityListDisplayName(m_editor, tmp, lengthOf(tmp), cmp.entity);
 			bool selected = false;
-			if (ImGui::Selectable(tmp, &selected)) m_editor.selectEntities(&cmp.entity, 1);
+			if (ImGui::Selectable(tmp, &selected)) m_editor.selectEntities(&cmp.entity, 1, false);
 			ImGui::NextColumn();
 			auto type = scene->getActorType(i);
 			cmp.entity = scene->getActorEntity(i);
@@ -646,18 +680,18 @@ struct StudioAppPlugin LUMIX_FINAL : public StudioApp::IPlugin
 				case PhysicsScene::ActorType::BOX:
 					ImGui::Text("%s", "box");
 					cmp.type = BOX_ACTOR_TYPE;
-					EditorPlugin::showBoxActorGizmo(cmp, *render_scene);
+					GizmoPlugin::showBoxActorGizmo(cmp, *render_scene);
 					break;
 				case PhysicsScene::ActorType::SPHERE:
 					ImGui::Text("%s", "sphere");
 					cmp.type = SPHERE_ACTOR_TYPE;
-					EditorPlugin::showSphereActorGizmo(cmp, *render_scene);
+					GizmoPlugin::showSphereActorGizmo(cmp, *render_scene);
 					break;
 				case PhysicsScene::ActorType::MESH: ImGui::Text("%s", "mesh"); break;
 				case PhysicsScene::ActorType::CAPSULE: 
 					ImGui::Text("%s", "capsule"); 
 					cmp.type = BOX_ACTOR_TYPE;
-					EditorPlugin::showCapsuleActorGizmo(cmp, *render_scene);
+					GizmoPlugin::showCapsuleActorGizmo(cmp, *render_scene);
 					break;
 				default: ImGui::Text("%s", "unknown"); break;
 			}
@@ -734,10 +768,10 @@ struct StudioAppPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			physx::PxTransform pose = a1->getGlobalPose() * joint->getLocalPose(physx::PxJointActorIndex::eACTOR1);
 			Matrix mtx = Quat(pose.q.x, pose.q.y, pose.q.z, pose.q.w).toMatrix();
 			mtx.setTranslation(Vec3(pose.p.x, pose.p.y, pose.p.z));
-			if(joint->is<physx::PxRevoluteJoint>())	EditorPlugin::showHingeJointGizmo(phy_scene, Vec2(0, 0), false, mtx);
+			if(joint->is<physx::PxRevoluteJoint>())	GizmoPlugin::showHingeJointGizmo(phy_scene, Vec2(0, 0), false, mtx);
 			if (joint->is<physx::PxD6Joint>())
 			{
-				EditorPlugin::showD6JointGizmo(
+				GizmoPlugin::showD6JointGizmo(
 					fromPhysx(a0->getGlobalPose()), render_scene, static_cast<physx::PxD6Joint*>(joint));
 			}
 		}
@@ -1023,29 +1057,63 @@ struct PhysicsGeometryPlugin LUMIX_FINAL : public AssetBrowser::IPlugin
 };
 
 
+struct StudioAppPlugin : StudioApp::IPlugin
+{
+	StudioAppPlugin(StudioApp& app)
+		: m_app(app)
+	{
+		app.registerComponent("distance_joint", "Physics/Joints/Distance");
+		app.registerComponent("hinge_joint", "Physics/Joints/Hinge");
+		app.registerComponent("spherical_joint", "Physics/Joints/Spherical");
+		app.registerComponent("d6_joint", "Physics/Joints/D6");
+		app.registerComponent("box_rigid_actor", "Physics/Box");
+		app.registerComponent("sphere_rigid_actor", "Physics/Sphere");
+		app.registerComponent("capsule_rigid_actor", "Physics/Capsule");
+		app.registerComponent("physical_controller", "Physics/Controller");
+		app.registerComponentWithResource("mesh_rigid_actor", "Physics/Mesh", PhysicsGeometry::TYPE, *Reflection::getProperty(MESH_ACTOR_TYPE, "Source"));
+		app.registerComponent("physical_heightfield", "Physics/Heightfield");
+		app.registerComponent("ragdoll", "Physics/Ragdoll");
+		app.registerComponent("rigid_actor", "Physics/Rigid actor");
+
+		WorldEditor& editor = app.getWorldEditor();
+		IAllocator& allocator = editor.getAllocator();
+
+		m_ui_plugin = LUMIX_NEW(allocator, PhysicsUIPlugin)(app);
+		m_gizmo_plugin = LUMIX_NEW(allocator, GizmoPlugin)(editor);
+		m_geom_plugin = LUMIX_NEW(allocator, PhysicsGeometryPlugin)(app);
+		
+		app.addPlugin(*m_ui_plugin);
+		editor.addPlugin(*m_gizmo_plugin);
+		app.getAssetBrowser().addPlugin(*m_geom_plugin);
+	}
+
+
+	~StudioAppPlugin()
+	{
+		m_app.removePlugin(*m_ui_plugin);
+		m_app.getWorldEditor().removePlugin(*m_gizmo_plugin);
+		m_app.getAssetBrowser().removePlugin(*m_geom_plugin);
+
+		IAllocator& allocator = m_app.getWorldEditor().getAllocator();
+		LUMIX_DELETE(allocator, m_ui_plugin);
+		LUMIX_DELETE(allocator, m_gizmo_plugin);
+		LUMIX_DELETE(allocator, m_geom_plugin);
+	}
+
+
+	StudioApp& m_app;
+	PhysicsUIPlugin* m_ui_plugin;
+	GizmoPlugin* m_gizmo_plugin;
+	PhysicsGeometryPlugin* m_geom_plugin;
+};
+
+
 } // anonymous
 
 
 LUMIX_STUDIO_ENTRY(physics)
 {
-	app.registerComponent("distance_joint", "Physics/Joints/Distance");
-	app.registerComponent("hinge_joint", "Physics/Joints/Hinge");
-	app.registerComponent("spherical_joint", "Physics/Joints/Spherical");
-	app.registerComponent("d6_joint", "Physics/Joints/D6");
-	app.registerComponent("box_rigid_actor", "Physics/Box");
-	app.registerComponent("sphere_rigid_actor", "Physics/Sphere");
-	app.registerComponent("capsule_rigid_actor", "Physics/Capsule");
-	app.registerComponent("physical_controller", "Physics/Controller");
-	app.registerComponentWithResource("mesh_rigid_actor", "Physics/Mesh", PhysicsGeometry::TYPE, *Reflection::getProperty(MESH_ACTOR_TYPE, "Source"));
-	app.registerComponent("physical_heightfield", "Physics/Heightfield");
-	app.registerComponent("ragdoll", "Physics/Ragdoll");
-	app.registerComponent("rigid_actor", "Physics/Rigid actor");
-
-	WorldEditor& editor = app.getWorldEditor();
-	IAllocator& allocator = editor.getAllocator();
-
-	app.addPlugin(*LUMIX_NEW(allocator, StudioAppPlugin)(app));
-	editor.addPlugin(*LUMIX_NEW(allocator, EditorPlugin)(editor));
-	app.getAssetBrowser().addPlugin(*LUMIX_NEW(allocator, PhysicsGeometryPlugin)(app));
+	IAllocator& allocator = app.getWorldEditor().getAllocator();
+	return LUMIX_NEW(allocator, StudioAppPlugin)(app);
 }
 

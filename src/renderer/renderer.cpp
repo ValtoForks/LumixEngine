@@ -109,8 +109,8 @@ struct BoneProperty : Reflection::IEnumProperty
 	}
 
 
-	int getEnumValueIndex(ComponentUID cmp, int value) const { return value; }
-	int getEnumValue(ComponentUID cmp, int index) const { return index; }
+	int getEnumValueIndex(ComponentUID cmp, int value) const override  { return value; }
+	int getEnumValue(ComponentUID cmp, int index) const override { return index; }
 
 
 	int getEnumCount(ComponentUID cmp) const override
@@ -275,7 +275,8 @@ static void registerProperties(IAllocator& allocator)
 				ResourceAttribute("Font (*.ttf)", FontResource::TYPE)),
 			property("Font Size", LUMIX_PROP(RenderScene, TextMeshFontSize)),
 			property("Color", LUMIX_PROP(RenderScene, TextMeshColorRGBA),
-				ColorAttribute())
+				ColorAttribute()),
+			property("Camera-oriented", LUMIX_PROP_FULL(RenderScene, isTextMeshCameraOriented, setTextMeshCameraOriented))
 		),
 		component("decal",
 			property("Material", LUMIX_PROP(RenderScene, DecalMaterialPath),
@@ -531,10 +532,9 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 
 		m_current_pass_hash = crc32("MAIN");
 		m_view_counter = 0;
-		m_mat_color_uniform =
-			bgfx::createUniform("u_materialColor", bgfx::UniformType::Vec4);
-		m_roughness_metallic_uniform =
-			bgfx::createUniform("u_roughnessMetallic", bgfx::UniformType::Vec4);
+		m_mat_color_uniform = bgfx::createUniform("u_materialColor", bgfx::UniformType::Vec4);
+		m_roughness_metallic_emission_uniform =
+			bgfx::createUniform("u_roughnessMetallicEmission", bgfx::UniformType::Vec4);
 
 		m_basic_vertex_decl.begin()
 			.add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
@@ -568,7 +568,7 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 		m_shader_binary_manager.destroy();
 
 		bgfx::destroy(m_mat_color_uniform);
-		bgfx::destroy(m_roughness_metallic_uniform);
+		bgfx::destroy(m_roughness_metallic_emission_uniform);
 		bgfx::frame();
 		bgfx::frame();
 		bgfx::shutdown();
@@ -626,7 +626,7 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 	const char* getShaderDefine(int define_idx) override { return m_shader_defines[define_idx]; }
 	const char* getPassName(int idx) override { return m_passes[idx]; }
 	const bgfx::UniformHandle& getMaterialColorUniform() const override { return m_mat_color_uniform; }
-	const bgfx::UniformHandle& getRoughnessMetallicUniform() const override { return m_roughness_metallic_uniform; }
+	const bgfx::UniformHandle& getRoughnessMetallicEmissionUniform() const override { return m_roughness_metallic_emission_uniform; }
 	void makeScreenshot(const Path& filename) override { bgfx::requestScreenShot(BGFX_INVALID_HANDLE, filename.c_str()); }
 	void resize(int w, int h) override { bgfx::reset(w, h, m_vsync ? BGFX_RESET_VSYNC : 0); }
 	int getViewCounter() const override { return m_view_counter; }
@@ -702,7 +702,7 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 	bgfx::VertexDecl m_basic_vertex_decl;
 	bgfx::VertexDecl m_basic_2d_vertex_decl;
 	bgfx::UniformHandle m_mat_color_uniform;
-	bgfx::UniformHandle m_roughness_metallic_uniform;
+	bgfx::UniformHandle m_roughness_metallic_emission_uniform;
 	Pipeline* m_main_pipeline;
 };
 

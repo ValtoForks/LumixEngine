@@ -5,6 +5,7 @@
 #include "engine/flag_set.h"
 #include "engine/iallocator.h"
 #include "engine/input_system.h"
+#include "engine/log.h"
 #include "engine/plugin_manager.h"
 #include "engine/reflection.h"
 #include "engine/resource_manager.h"
@@ -25,30 +26,70 @@ namespace Lumix
 
 static const ComponentType GUI_BUTTON_TYPE = Reflection::getComponentType("gui_button");
 static const ComponentType GUI_RECT_TYPE = Reflection::getComponentType("gui_rect");
+static const ComponentType GUI_RENDER_TARGET_TYPE = Reflection::getComponentType("gui_render_target");
 static const ComponentType GUI_IMAGE_TYPE = Reflection::getComponentType("gui_image");
 static const ComponentType GUI_TEXT_TYPE = Reflection::getComponentType("gui_text");
 static const ComponentType GUI_INPUT_FIELD_TYPE = Reflection::getComponentType("gui_input_field");
 static const float CURSOR_BLINK_PERIOD = 1.0f;
-
+static bgfx::TextureHandle EMPTY_RENDER_TARGET = BGFX_INVALID_HANDLE;
 
 struct GUIText
 {
 	GUIText(IAllocator& allocator) : text("", allocator) {}
-	~GUIText()
+	~GUIText() { setFontResource(nullptr); }
+
+
+	void setFontResource(FontResource* res)
 	{
-		if (font_resource)
+		if (m_font_resource)
 		{
-			font_resource->removeRef(*font);
-			font_resource->getResourceManager().unload(*font_resource);
+			if (m_font)
+			{
+				m_font_resource->removeRef(*m_font);
+				m_font = nullptr;
+			}
+			m_font_resource->getObserverCb().unbind<GUIText, &GUIText::onFontLoaded>(this);
+			m_font_resource->getResourceManager().unload(*m_font_resource);
+		}
+		m_font_resource = res;
+		if (res) res->onLoaded<GUIText, &GUIText::onFontLoaded>(this);
+	}
+
+
+	void onFontLoaded(Resource::State old_state, Resource::State new_state, Resource&)
+	{
+		if (m_font && new_state != Resource::State::READY)
+		{
+			m_font_resource->removeRef(*m_font);
+			m_font = nullptr;
+		}
+		if (new_state == Resource::State::READY) m_font = m_font_resource->addRef(m_font_size);
+	}
+
+	void setFontSize(int value)
+	{
+		m_font_size = value;
+		if (m_font_resource && m_font_resource->isReady())
+		{
+			if(m_font) m_font_resource->removeRef(*m_font);
+			m_font = m_font_resource->addRef(m_font_size);
 		}
 	}
 
-	FontResource* font_resource = nullptr;
-	Font* font = nullptr;
+
+	FontResource* getFontResource() const { return m_font_resource; }
+	int getFontSize() const { return m_font_size; }
+	Font* getFont() const { return m_font; }
+
+
 	string text;
-	int font_size = 13;
 	GUIScene::TextHAlign horizontal_align = GUIScene::TextHAlign::LEFT;
 	u32 color = 0xff000000;
+
+private:
+	int m_font_size = 13;
+	Font* m_font = nullptr;
+	FontResource* m_font_resource = nullptr;
 };
 
 
@@ -103,6 +144,7 @@ struct GUIRect
 	GUIImage* image = nullptr;
 	GUIText* text = nullptr;
 	GUIInputField* input_field = nullptr;
+	bgfx::TextureHandle* render_target = nullptr;
 };
 
 
@@ -117,6 +159,8 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 		, m_rect_hovered(allocator)
 		, m_rect_hovered_out(allocator)
 		, m_button_clicked(allocator)
+		, m_buttons_down_count(0)
+		, m_canvas_size(800, 600)
 	{
 		context.registerComponentType(GUI_RECT_TYPE
 			, this
@@ -130,6 +174,12 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 			, &GUISceneImpl::destroyImage
 			, &GUISceneImpl::serializeImage
 			, &GUISceneImpl::deserializeImage);
+		context.registerComponentType(GUI_RENDER_TARGET_TYPE
+			, this
+			, &GUISceneImpl::createRenderTarget
+			, &GUISceneImpl::destroyRenderTarget
+			, &GUISceneImpl::serializeRenderTarget
+			, &GUISceneImpl::deserializeRenderTarget);
 		context.registerComponentType(GUI_INPUT_FIELD_TYPE
 			, this
 			, &GUISceneImpl::createInputField
@@ -159,7 +209,9 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 
 		const char* text = rect.text->text.c_str();
 		const char* text_end = text + rect.input_field->cursor;
-		Vec2 text_size = rect.text->font->CalcTextSizeA((float)rect.text->font_size, FLT_MAX, 0, text, text_end);
+		Font* font = rect.text->getFont();
+		float font_size = (float)rect.text->getFontSize();
+		Vec2 text_size = font->CalcTextSizeA(font_size, FLT_MAX, 0, text, text_end);
 		draw.AddLine({ pos.x + text_size.x, pos.y }, { pos.x + text_size.x, pos.y + text_size.y }, rect.text->color, 1);
 	}
 
@@ -223,11 +275,20 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 				draw.AddRectFilled({ l, t }, { r, b }, rect.image->color);
 			}
 		}
+
+		if (rect.render_target && bgfx::isValid(*rect.render_target))
+		{
+			draw.AddImage(rect.render_target, { l, t }, { r, b });
+		}
+
 		if (rect.text)
 		{
+			Font* font = rect.text->getFont();
+			if (!font) font = m_font_manager->getDefaultFont();
+
 			const char* text_cstr = rect.text->text.c_str();
-			float font_size = (float)rect.text->font_size;
-			Vec2 text_size = rect.text->font->CalcTextSizeA(font_size, FLT_MAX, 0, text_cstr);
+			float font_size = (float)rect.text->getFontSize();
+			Vec2 text_size = font->CalcTextSizeA(font_size, FLT_MAX, 0, text_cstr);
 			Vec2 text_pos(l, t);
 
 			switch (rect.text->horizontal_align)
@@ -237,30 +298,21 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 				case TextHAlign::CENTER: text_pos.x = (r + l - text_size.x) * 0.5f; break; 
 			}
 
-			draw.AddText(rect.text->font, font_size, text_pos, rect.text->color, text_cstr);
+			draw.AddText(font, font_size, text_pos, rect.text->color, text_cstr);
 			renderTextCursor(rect, draw, text_pos);
 		}
 
 		Entity child = m_universe.getFirstChild(rect.entity);
-		if (child.isValid())
+		while (child.isValid())
 		{
 			int idx = m_rects.find(child);
 			if (idx >= 0)
 			{
 				renderRect(*m_rects.at(idx), pipeline, { l, t, r - l, b - t });
 			}
+			child = m_universe.getNextSibling(child);
 		}
 		if (rect.flags.isSet(GUIRect::IS_CLIP)) draw.PopClipRect();
-
-		Entity sibling = m_universe.getNextSibling(rect.entity);
-		if (sibling.isValid())
-		{
-			int idx = m_rects.find(sibling);
-			if (idx >= 0)
-			{
-				renderRect(*m_rects.at(idx), pipeline, parent_rect);
-			}
-		}
 	}
 
 
@@ -468,17 +520,14 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 	void setTextFontSize(Entity entity, int value) override
 	{
 		GUIText* gui_text = m_rects[entity]->text;
-		FontResource* res = gui_text->font_resource;
-		if (res) res->removeRef(*gui_text->font);
-		gui_text->font_size = value;
-		if (res) gui_text->font = res->addRef(gui_text->font_size);
+		gui_text->setFontSize(value);
 	}
 	
 	
 	int getTextFontSize(Entity entity) override
 	{
 		GUIText* gui_text = m_rects[entity]->text;
-		return gui_text->font_size;
+		return gui_text->getFontSize();
 	}
 	
 	
@@ -499,27 +548,15 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 	Path getTextFontPath(Entity entity) override
 	{
 		GUIText* gui_text = m_rects[entity]->text;
-		return gui_text->font_resource == nullptr ? Path() : gui_text->font_resource->getPath();
+		return gui_text->getFontResource() == nullptr ? Path() : gui_text->getFontResource()->getPath();
 	}
 
 
 	void setTextFontPath(Entity entity, const Path& path) override
 	{
 		GUIText* gui_text = m_rects[entity]->text;
-		FontResource* res = gui_text->font_resource;
-		if (res)
-		{
-			res->removeRef(*gui_text->font);
-			res->getResourceManager().unload(*res);
-		}
-		if (!path.isValid())
-		{
-			gui_text->font_resource = nullptr;
-			gui_text->font = m_font_manager->getDefaultFont();
-			return;
-		}
-		gui_text->font_resource = (FontResource*)m_font_manager->load(path);
-		gui_text->font = gui_text->font_resource->addRef(gui_text->font_size);
+		FontResource* res = path.isValid() ? (FontResource*)m_font_manager->load(path) : nullptr;
+		gui_text->setFontResource(res);
 	}
 
 
@@ -604,6 +641,26 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 	}
 
 
+	void serializeRenderTarget(ISerializer& serializer, Entity entity)
+	{
+	}
+
+
+	void deserializeRenderTarget(IDeserializer& serializer, Entity entity, int /*scene_version*/)
+	{
+		int idx = m_rects.find(entity);
+		if (idx < 0)
+		{
+			GUIRect* rect = LUMIX_NEW(m_allocator, GUIRect);
+			rect->entity = entity;
+			idx = m_rects.insert(entity, rect);
+		}
+		GUIRect& rect = *m_rects.at(idx);
+		rect.render_target = &EMPTY_RENDER_TARGET;
+		m_universe.onComponentCreated(entity, GUI_RENDER_TARGET_TYPE, this);
+	}
+
+
 	void serializeButton(ISerializer& serializer, Entity entity)
 	{
 		const GUIButton& button = m_buttons[entity];
@@ -685,10 +742,10 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 	void serializeText(ISerializer& serializer, Entity entity)
 	{
 		const GUIRect& rect = *m_rects[entity];
-		serializer.write("font", rect.text->font_resource ? rect.text->font_resource->getPath().c_str() : "");
+		serializer.write("font", rect.text->getFontResource() ? rect.text->getFontResource()->getPath().c_str() : "");
 		serializer.write("align", (int)rect.text->horizontal_align);
 		serializer.write("color", rect.text->color);
-		serializer.write("font_size", rect.text->font_size);
+		serializer.write("font_size", rect.text->getFontSize());
 		serializer.write("text", rect.text->text.c_str());
 	}
 
@@ -709,18 +766,12 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 		serializer.read(tmp, lengthOf(tmp));
 		serializer.read((int*)&rect.text->horizontal_align);
 		serializer.read(&rect.text->color);
-		serializer.read(&rect.text->font_size);
+		int font_size;
+		serializer.read(&font_size);
+		rect.text->setFontSize(font_size);
 		serializer.read(&rect.text->text);
-		if (tmp[0] == '\0')
-		{
-			rect.text->font_resource = nullptr;
-			rect.text->font = m_font_manager->getDefaultFont();
-		}
-		else
-		{
-			rect.text->font_resource = (FontResource*)m_font_manager->load(Path(tmp));
-			rect.text->font = rect.text->font_resource->addRef(rect.text->font_size);
-		}
+		FontResource* res = tmp[0] ? (FontResource*)m_font_manager->load(Path(tmp)) : nullptr;
+		rect.text->setFontResource(res);
 
 		m_universe.onComponentCreated(entity, GUI_TEXT_TYPE, this);
 	}
@@ -746,9 +797,9 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 		if (idx < 0) return;
 
 		const GUIButton& button = m_buttons.at(idx);
-		if (!rect.image) return;
 
-		rect.image->color = button.normal_color;
+		if (rect.image) rect.image->color = button.normal_color;
+		if (rect.text) rect.text->color = button.normal_color;
 
 		m_rect_hovered_out.invoke(rect.entity);
 	}
@@ -761,9 +812,8 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 
 		const GUIButton& button = m_buttons.at(idx);
 
-		if (!rect.image) return;
-
-		rect.image->color = button.hovered_color;
+		if (rect.image) rect.image->color = button.hovered_color;
+		if (rect.text) rect.text->color = button.hovered_color;
 
 		m_rect_hovered.invoke(rect.entity);
 	}
@@ -797,10 +847,20 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 	}
 
 
+	bool isButtonDown(Entity e) const
+	{
+		for(int i = 0, c = m_buttons_down_count; i < c; ++i)
+		{
+			if (m_buttons_down[i] == e) return true;
+		}
+		return false;
+	}
+
+
 	void handleMouseButtonEvent(const Rect& parent_rect, GUIRect& rect, const InputSystem::Event& event)
 	{
 		if (!rect.flags.isSet(GUIRect::IS_ENABLED)) return;
-		if (event.data.button.state != InputSystem::ButtonEvent::UP) return;
+		bool is_up = event.data.button.state == InputSystem::ButtonEvent::UP;
 
 		Vec2 pos(event.data.button.x_abs, event.data.button.y_abs);
 		const Rect& r = getRectOnCanvas(parent_rect, rect);
@@ -809,11 +869,26 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 		{
 			if (m_buttons.find(rect.entity) >= 0)
 			{
-				m_focused_entity = INVALID_ENTITY;
-				m_button_clicked.invoke(rect.entity);
+				if (is_up && isButtonDown(rect.entity))
+				{
+					m_focused_entity = INVALID_ENTITY;
+					m_button_clicked.invoke(rect.entity);
+				}
+				if (!is_up)
+				{
+					if (m_buttons_down_count < lengthOf(m_buttons_down))
+					{
+						m_buttons_down[m_buttons_down_count] = rect.entity;
+						++m_buttons_down_count;
+					}
+					else
+					{
+						g_log_error.log("GUI") << "Too many buttons pressed at once";
+					}
+				}
 			}
 			
-			if (rect.input_field)
+			if (rect.input_field && is_up)
 			{
 				m_focused_entity = rect.entity;
 				if (rect.text)
@@ -923,6 +998,7 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 							m_mouse_down_pos.y = event.data.button.y_abs;
 						}
 						handleMouseButtonEvent({ 0, 0, m_canvas_size.x, m_canvas_size.y }, *m_root, event);
+						if (event.data.button.state == InputSystem::ButtonEvent::UP) m_buttons_down_count = 0;
 					}
 					else if (event.device->type == InputSystem::Device::KEYBOARD)
 					{
@@ -984,9 +1060,21 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 		}
 		GUIRect& rect = *m_rects.at(idx);
 		rect.text = LUMIX_NEW(m_allocator, GUIText)(m_allocator);
-		rect.text->font = m_font_manager->getDefaultFont();
 
 		m_universe.onComponentCreated(entity, GUI_TEXT_TYPE, this);
+	}
+
+
+	void createRenderTarget(Entity entity)
+	{
+		int idx = m_rects.find(entity);
+		if (idx < 0)
+		{
+			createRect(entity);
+			idx = m_rects.find(entity);
+		}
+		m_rects.at(idx)->render_target = &EMPTY_RENDER_TARGET;
+		m_universe.onComponentCreated(entity, GUI_RENDER_TARGET_TYPE, this);
 	}
 
 
@@ -1081,6 +1169,14 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 	}
 
 
+	void destroyRenderTarget(Entity entity)
+	{
+		GUIRect* rect = m_rects[entity];
+		rect->render_target = nullptr;
+		m_universe.onComponentDestroyed(entity, GUI_RENDER_TARGET_TYPE, this);
+	}
+
+
 	void destroyInputField(Entity entity)
 	{
 		GUIRect* rect = m_rects[entity];
@@ -1133,10 +1229,10 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 			serializer.write(rect->text != nullptr);
 			if (rect->text)
 			{
-				serializer.writeString(rect->text->font_resource ? rect->text->font_resource->getPath().c_str() : "");
+				serializer.writeString(rect->text->getFontResource() ? rect->text->getFontResource()->getPath().c_str() : "");
 				serializer.write(rect->text->horizontal_align);
 				serializer.write(rect->text->color);
-				serializer.write(rect->text->font_size);
+				serializer.write(rect->text->getFontSize());
 				serializer.write(rect->text->text);
 			}
 		}
@@ -1206,18 +1302,12 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 				serializer.readString(tmp, lengthOf(tmp));
 				serializer.read(text.horizontal_align);
 				serializer.read(text.color);
-				serializer.read(text.font_size);
+				int font_size;
+				serializer.read(font_size);
+				text.setFontSize(font_size);
 				serializer.read(text.text);
-				if (tmp[0] == '\0')
-				{
-					text.font_resource = nullptr;
-					text.font = m_font_manager->getDefaultFont();
-				}
-				else
-				{
-					text.font_resource = (FontResource*)m_font_manager->load(Path(tmp));
-					text.font = text.font_resource->addRef(text.font_size);
-				}
+				FontResource* res = tmp[0] == 0 ? nullptr : (FontResource*)m_font_manager->load(Path(tmp));
+				text.setFontResource(res);
 				m_universe.onComponentCreated(rect->entity, GUI_TEXT_TYPE, this);
 			}
 		}
@@ -1232,6 +1322,12 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 		m_root = findRoot();
 	}
 	
+
+	void setRenderTarget(Entity entity, bgfx::TextureHandle* texture_handle) override
+	{
+		m_rects[entity]->render_target = texture_handle;
+	}
+
 	
 	DelegateList<void(Entity)>& buttonClicked() override
 	{
@@ -1260,6 +1356,8 @@ struct GUISceneImpl LUMIX_FINAL : public GUIScene
 	
 	AssociativeArray<Entity, GUIRect*> m_rects;
 	AssociativeArray<Entity, GUIButton> m_buttons;
+	Entity m_buttons_down[16];
+	int m_buttons_down_count;
 	Entity m_focused_entity = INVALID_ENTITY;
 	GUIRect* m_root = nullptr;
 	FontManager* m_font_manager = nullptr;

@@ -175,24 +175,27 @@ public:
 		: m_blob(editor.getAllocator())
 		, m_editor(editor)
 		, m_entities(editor.getAllocator())
+		, m_identity(false)
 	{
 	}
 
 
-	PasteEntityCommand(WorldEditor& editor, const OutputBlob& blob)
+	PasteEntityCommand(WorldEditor& editor, const OutputBlob& blob, bool identity=false)
 		: m_blob(blob, editor.getAllocator())
 		, m_editor(editor)
 		, m_position(editor.getCameraRaycastHit())
 		, m_entities(editor.getAllocator())
+		, m_identity(identity)
 	{
 	}
 
 
-	PasteEntityCommand(WorldEditor& editor, const Vec3& pos, const InputBlob& blob)
+	PasteEntityCommand(WorldEditor& editor, const Vec3& pos, const InputBlob& blob, bool identity = false)
 		: m_blob(blob, editor.getAllocator())
 		, m_editor(editor)
 		, m_position(pos)
 		, m_entities(editor.getAllocator())
+		, m_identity(identity)
 	{
 	}
 
@@ -205,6 +208,7 @@ public:
 		serializer.serialize("pos_x", m_position.x);
 		serializer.serialize("pos_y", m_position.y);
 		serializer.serialize("pos_z", m_position.z);
+		serializer.serialize("identity", m_identity);
 		serializer.serialize("size", m_blob.getPos());
 		serializer.beginArray("data");
 		for (int i = 0; i < m_blob.getPos(); ++i)
@@ -220,6 +224,7 @@ public:
 		serializer.deserialize("pos_x", m_position.x, 0);
 		serializer.deserialize("pos_y", m_position.y, 0);
 		serializer.deserialize("pos_z", m_position.z, 0);
+		serializer.deserialize("identity", m_identity, false);
 		int size;
 		serializer.deserialize("size", size, 0);
 		serializer.deserializeArrayBegin("data");
@@ -256,6 +261,7 @@ private:
 	WorldEditor& m_editor;
 	Vec3 m_position;
 	Array<Entity> m_entities;
+	bool m_identity;
 };
 
 
@@ -301,7 +307,7 @@ public:
 			if (prefab != 0 && parent.isValid() && (prefab_system.getPrefab(parent) & 0xffffFFFF) == (prefab & 0xffffFFFF))
 			{
 				float scale = universe->getScale(entities[i]);
-				Transform new_local_tr = universe->computeLocalTransform(parent, {new_positions[i], new_rotations[i], scale});
+				Transform new_local_tr = universe->computeLocalTransform(parent, { new_positions[i], new_rotations[i], scale });
 				Entity instance = prefab_system.getFirstInstance(prefab);
 				while (instance.isValid())
 				{
@@ -1317,7 +1323,9 @@ private:
 			for (int i = 0; i < count; ++i)
 			{
 				m_entities.push(entities[i]);
+				pushChildren(entities[i]);
 			}
+			m_entities.removeDuplicates();
 			m_transformations.reserve(m_entities.size());
 		}
 
@@ -1327,6 +1335,17 @@ private:
 			for (Resource* resource : m_resources)
 			{
 				resource->getResourceManager().unload(*resource);
+			}
+		}
+
+
+		void pushChildren(Entity entity)
+		{
+			Universe* universe = m_editor.getUniverse();
+			for (Entity e = universe->getFirstChild(entity); e.isValid(); e = universe->getNextSibling(e))
+			{
+				m_entities.push(e);
+				pushChildren(e);
 			}
 		}
 
@@ -1406,16 +1425,12 @@ private:
 				{
 					Transform local_tr = universe->getLocalTransform(m_entities[i]);
 					m_old_values.write(local_tr);
-					float local_scale = universe->getLocalScale(m_entities[i]);
-					m_old_values.write(local_scale);
 				}
 				for (Entity child = universe->getFirstChild(m_entities[i]); child.isValid(); child = universe->getNextSibling(child))
 				{
 					m_old_values.write(child);
 					Transform local_tr = universe->getLocalTransform(child);
 					m_old_values.write(local_tr);
-					float local_scale = universe->getLocalScale(child);
-					m_old_values.write(local_scale);
 				}
 				m_old_values.write(INVALID_ENTITY);
 
@@ -1441,9 +1456,11 @@ private:
 				}
 				u64 prefab = m_editor.getPrefabSystem().getPrefab(m_entities[i]);
 				m_old_values.write(prefab);
-
-				universe->destroyEntity(m_entities[i]);
-				m_editor.m_entity_map.erase(m_entities[i]);
+			}
+			for (Entity e : m_entities)
+			{
+				universe->destroyEntity(e);
+				m_editor.m_entity_map.erase(e);
 			}
 			return true;
 		}
@@ -1695,7 +1712,7 @@ private:
 				m_editor.getUniverse()->setPosition(m_entity, m_position);
 			}
 			((WorldEditorImpl&)m_editor).m_entity_map.create(m_entity);
-			m_editor.selectEntities(&m_entity, 1);
+			m_editor.selectEntities(&m_entity, 1, false);
 			return true;
 		}
 
@@ -1872,10 +1889,7 @@ public:
 
 		removePlugin(*m_measure_tool);
 		LUMIX_DELETE(m_allocator, m_measure_tool);
-		for (auto* plugin : m_plugins)
-		{
-			LUMIX_DELETE(getAllocator(), plugin);
-		}
+		ASSERT(m_plugins.empty());
 
 		EditorIcons::destroy(*m_editor_icons);
 		PrefabSystem::destroy(m_prefab_system);
@@ -2040,7 +2054,7 @@ public:
 		if (min.y > max.y) Math::swap(min.y, max.y);
 		Frustum frustum = m_render_interface->getFrustum(camera_entity, min, max);
 		m_render_interface->getModelInstaces(entities, frustum, camera_pos, camera_entity);
-		selectEntities(entities.empty() ? nullptr : &entities[0], entities.size());
+		selectEntities(entities.empty() ? nullptr : &entities[0], entities.size(), false);
 	}
 
 
@@ -2077,26 +2091,12 @@ public:
 					if (icon_hit.entity != INVALID_ENTITY)
 					{
 						Entity e = icon_hit.entity;
-						if (m_is_additive_selection)
-						{
-							addEntitiesToSelection(&e, 1);
-						}
-						else
-						{
-							selectEntities(&e, 1);
-						}
+						selectEntities(&e, 1, true);
 					}
 					else if (hit.is_hit)
 					{
 						Entity entity = hit.entity;
-						if (m_is_additive_selection)
-						{
-							addEntitiesToSelection(&entity, 1);
-						}
-						else
-						{
-							selectEntities(&entity, 1);
-						}
+						selectEntities(&entity, 1, true);
 					}
 				}
 			}
@@ -2125,9 +2125,9 @@ public:
 		g_log_info.log("Editor") << "Saving universe " << basename << "...";
 		
 		auto& fs = m_engine->getFileSystem();
-		StaticString<MAX_PATH_LENGTH> dir(m_engine->getDiskFileDevice()->getBasePath(), "universes");
+		StaticString<MAX_PATH_LENGTH> dir(m_engine->getDiskFileDevice()->getBasePath(), "universes/");
 		PlatformInterface::makePath(dir);
-		StaticString<MAX_PATH_LENGTH> path("universes/", basename, ".unv");
+		StaticString<MAX_PATH_LENGTH> path(dir, basename, ".unv");
 		FS::IFile* file = fs.open(fs.getDefaultDevice(), Path(path), FS::Mode::CREATE_AND_WRITE);
 		save(*file);
 		fs.close(*file);
@@ -2751,7 +2751,6 @@ public:
 		executeCommand(command);
 	}
 
-
 	void setEntitiesPositionsAndRotations(const Entity* entities,
 		const Vec3* positions,
 		const Quat* rotations,
@@ -2894,7 +2893,7 @@ public:
 		ASSERT(m_universe);
 		m_engine->getResourceManager().enableUnload(false);
 		m_engine->stopGame(*m_universe);
-		selectEntities(nullptr, 0);
+		selectEntities(nullptr, 0, false);
 		m_gizmo->clearEntities();
 		m_editor_icons->clear();
 		m_is_game_mode = false;
@@ -2915,7 +2914,7 @@ public:
 		}
 		m_engine->getFileSystem().close(*m_game_mode_file);
 		m_game_mode_file = nullptr;
-		if(m_selected_entity_on_game_mode.isValid()) selectEntities(&m_selected_entity_on_game_mode, 1);
+		if(m_selected_entity_on_game_mode.isValid()) selectEntities(&m_selected_entity_on_game_mode, 1, false);
 		m_engine->getResourceManager().enableUnload(true);
 	}
 
@@ -2979,6 +2978,14 @@ public:
 	void pasteEntities() override
 	{
 		PasteEntityCommand* command = LUMIX_NEW(m_allocator, PasteEntityCommand)(*this, m_copy_buffer);
+		executeCommand(command);
+	}
+
+	void duplicateEntities() override
+	{
+		copyEntities();
+
+		PasteEntityCommand* command = LUMIX_NEW(m_allocator, PasteEntityCommand)(*this, m_copy_buffer, true);
 		executeCommand(command);
 	}
 
@@ -3180,7 +3187,7 @@ public:
 		, m_is_loading(false)
 		, m_universe(nullptr)
 		, m_is_orbit(false)
-		, m_is_additive_selection(false)
+		, m_is_toggle_selection(false)
 		, m_mouse_sensitivity(200, 200)
 		, m_render_interface(nullptr)
 		, m_selected_entity_on_game_mode(INVALID_ENTITY)
@@ -3293,7 +3300,7 @@ public:
 	}
 
 
-	void setAdditiveSelection(bool additive) override { m_is_additive_selection = additive; }
+	void setToggleSelection(bool is_toggle) override { m_is_toggle_selection = is_toggle; }
 
 
 	void addArrayPropertyItem(const ComponentUID& cmp, const Reflection::IArrayProperty& property) override
@@ -3412,24 +3419,34 @@ public:
 	}
 
 
-	void addEntitiesToSelection(const Entity* entities, int count)
+	void selectEntities(const Entity* entities, int count, bool toggle) override
 	{
-		for (int i = 0; i < count; ++i)
+		if (!toggle || !m_is_toggle_selection)
 		{
-			m_selected_entities.push(entities[i]);
+			m_gizmo->clearEntities();
+			m_selected_entities.clear();
+			for (int i = 0; i < count; ++i)
+			{
+				m_selected_entities.push(entities[i]);
+			}
 		}
-		m_entity_selected.invoke(m_selected_entities);
-	}
-
-
-	void selectEntities(const Entity* entities, int count) override
-	{
-		m_gizmo->clearEntities();
-		m_selected_entities.clear();
-		for (int i = 0; i < count; ++i)
+		else
 		{
-			m_selected_entities.push(entities[i]);
+			for (int i = 0; i < count; ++i)
+			{
+				int idx = m_selected_entities.indexOf(entities[i]);
+				if (idx < 0)
+				{
+					m_selected_entities.push(entities[i]);
+				}
+				else
+				{
+					m_selected_entities.eraseFast(idx);
+				}
+			}
 		}
+
+		m_selected_entities.removeDuplicates();
 		m_entity_selected.invoke(m_selected_entities);
 	}
 
@@ -3449,7 +3466,7 @@ public:
 		m_universe_destroyed.invoke();
 		m_editor_icons->clear();
 		m_gizmo->clearEntities();
-		selectEntities(nullptr, 0);
+		selectEntities(nullptr, 0, false);
 		m_camera = INVALID_ENTITY;
 		m_engine->destroyUniverse(*m_universe);
 		m_universe = nullptr;
@@ -3872,7 +3889,7 @@ private:
 	bool m_is_game_mode;
 	int m_game_mode_commands;
 	bool m_is_orbit;
-	bool m_is_additive_selection;
+	bool m_is_toggle_selection;
 	SnapMode m_snap_mode;
 	FS::IFile* m_game_mode_file;
 	Engine* m_engine;
@@ -3906,11 +3923,10 @@ bool PasteEntityCommand::execute()
 {
 	InputBlob blob(m_blob.getData(), m_blob.getPos());
 
-	m_entities.clear();
-
 	int entity_count;
 	blob.read(entity_count);
 	m_entities.reserve(entity_count);
+	bool is_redo = !m_entities.empty();
 
 	Universe& universe = *m_editor.getUniverse();
 	Matrix base_matrix = Matrix::IDENTITY;
@@ -3921,21 +3937,35 @@ bool PasteEntityCommand::execute()
 		blob.read(mtx);
 		Entity parent;
 		blob.read(parent);
-		if (i == 0)
+
+		if (!m_identity)
 		{
-			Matrix inv = mtx;
-			inv.inverse();
-			base_matrix.copy3x3(mtx);
-			base_matrix = base_matrix * inv;
-			mtx.setTranslation(m_position);
+			if (i == 0)
+			{
+				Matrix inv = mtx;
+				inv.inverse();
+				base_matrix.copy3x3(mtx);
+				base_matrix = base_matrix * inv;
+				mtx.setTranslation(m_position);
+			}
+			else
+			{
+				mtx = base_matrix * mtx;
+			}
+		}
+
+		Entity new_entity;
+		if (is_redo)
+		{
+			new_entity = m_entities[i];
+			universe.emplaceEntity(m_entities[i]);
 		}
 		else
 		{
-			mtx = base_matrix * mtx;
+			new_entity = universe.createEntity(Vec3(0, 0, 0), Quat(0, 0, 0, 1));
 		}
-		Entity new_entity = universe.createEntity(Vec3(0, 0, 0), Quat(0, 0, 0, 1));
 		((WorldEditorImpl&)m_editor).m_entity_map.create(new_entity);
-		m_entities.push(new_entity);
+		if (!is_redo) m_entities.push(new_entity);
 		universe.setMatrix(new_entity, mtx);
 		universe.setParent(parent, new_entity);
 		i32 count;
@@ -3960,7 +3990,6 @@ void PasteEntityCommand::undo()
 		m_editor.getUniverse()->destroyEntity(entity);
 		((WorldEditorImpl&)m_editor).m_entity_map.erase(entity);
 	}
-	m_entities.clear();
 }
 
 

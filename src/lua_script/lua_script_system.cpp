@@ -1,4 +1,5 @@
 #include "lua_script_system.h"
+#include "animation/animation_scene.h"
 #include "engine/array.h"
 #include "engine/binary_array.h"
 #include "engine/blob.h"
@@ -134,7 +135,7 @@ namespace Lumix
 					if (lua_type(L, -1) != LUA_TFUNCTION)
 					{
 						const char* name = lua_tostring(L, -2);
-						if(name[0] != '_')
+						if(name[0] != '_' && !equalStrings(name, "enabled"))
 						{
 							u32 hash = crc32(name);
 							if (m_scene.m_property_names.find(hash) < 0)
@@ -189,8 +190,9 @@ namespace Lumix
 			void onScriptLoaded(Resource::State, Resource::State, Resource& resource)
 			{
 				lua_State* L = m_scene.m_system.m_engine.getState();
-				for (auto& script : m_scripts)
+				for (int scr_index = 0, c = m_scripts.size(); scr_index < c; ++scr_index)
 				{
+					auto& script = m_scripts[scr_index];
 					if (!script.m_script) continue;
 					if (!script.m_script->isReady()) continue;
 					if (script.m_script != &resource) continue;
@@ -251,6 +253,9 @@ namespace Lumix
 					lua_pop(script.m_state, 1); // []
 
 					detectProperties(script);
+					
+					bool enabled = script.m_flags.isSet(ScriptInstance::ENABLED);
+					m_scene.setEnableProperty(m_entity, scr_index, script, enabled);
 
 					if (m_scene.m_is_game_running) m_scene.startScript(script, is_reload);
 				}
@@ -320,6 +325,7 @@ namespace Lumix
 			, m_property_names(system.m_allocator)
 			, m_is_game_running(false)
 			, m_is_api_registered(false)
+			, m_animation_scene(nullptr)
 		{
 			m_function_call.is_in_progress = false;
 			
@@ -782,7 +788,7 @@ namespace Lumix
 				visitor.cmp_type = cmp_type;
 				visitor.L = L;
 
-				cmp_desc->visit(visitor);
+				if(cmp_desc) cmp_desc->visit(visitor);
 
 				lua_pop(L, 1);
 			}
@@ -880,7 +886,7 @@ namespace Lumix
 			m_system.m_engine.unloadLuaResource(res_idx);
 			lua_pop(script.m_state, 1);
 
-			int new_res = m_system.m_engine.addLuaResource(Path(value), prop.resource_type);
+			int new_res = value[0] ? m_system.m_engine.addLuaResource(Path(value), prop.resource_type) : -1;
 			lua_pushinteger(script.m_state, new_res);
 			lua_setfield(script.m_state, -2, name);
 			lua_pop(script.m_state, 1);
@@ -1123,6 +1129,7 @@ namespace Lumix
 
 		void startGame() override
 		{
+			m_animation_scene = (AnimationScene*)m_universe.getScene(crc32("animation"));
 			m_is_game_running = true;
 			m_gui_scene = (GUIScene*)m_universe.getScene(crc32("gui"));
 			if (m_gui_scene)
@@ -1148,6 +1155,7 @@ namespace Lumix
 			m_updates.clear();
 			m_input_handlers.clear();
 			m_timers.clear();
+			m_animation_scene = nullptr;
 		}
 
 
@@ -1635,6 +1643,49 @@ namespace Lumix
 				}
 				lua_pop(update_item.state, 1);
 			}
+
+			processAnimationEvents();
+		}
+
+
+		void processAnimationEvents()
+		{
+			if (!m_animation_scene) return;
+
+			InputBlob blob(m_animation_scene->getEventStream());
+			u32 lua_call_type = crc32("lua_call");
+			while (blob.getPosition() < blob.getSize())
+			{
+				u32 type;
+				u8 size;
+				Entity entity;
+				blob.read(type);
+				blob.read(entity);
+				blob.read(size);
+				if (type == lua_call_type)
+				{
+					char tmp[64];
+					if (size + 1 > sizeof(tmp))
+					{
+						blob.skip(size);
+						g_log_error.log("Lua Script") << "Skipping lua_call animation event because it is too big.";
+					}
+					else
+					{
+						blob.read(tmp, size);
+						tmp[size] = 0;
+						ScriptComponent* scr = m_scripts[entity];
+						for (int i = 0, c = scr->m_scripts.size(); i < c; ++i)
+						{
+							if (beginFunctionCall(entity, i, tmp)) endFunctionCall();
+						}
+					}
+				}
+				else
+				{
+					blob.skip(size);
+				}
+			}
 		}
 
 
@@ -1704,12 +1755,30 @@ namespace Lumix
 		}
 
 
+		void setEnableProperty(Entity entity, int scr_index, ScriptInstance& inst, bool enabled)
+		{
+			if (!inst.m_state) return;
+
+			bool is_env_valid = lua_rawgeti(inst.m_state, LUA_REGISTRYINDEX, inst.m_environment) == LUA_TTABLE; // [env]
+			ASSERT(is_env_valid);
+			lua_pushboolean(inst.m_state, enabled);  // [env, enabled]
+			lua_setfield(inst.m_state, -2, "enabled"); // [env]
+			lua_pop(inst.m_state, 1); // []
+
+			const char* fn = enabled ? "onEnable" : "onDisable";
+			if (beginFunctionCall(entity, scr_index, fn)) endFunctionCall();
+		}
+
+
 		void enableScript(Entity entity, int scr_index, bool enable) override
 		{
 			ScriptInstance& inst = m_scripts[entity]->m_scripts[scr_index];
 			if (inst.m_flags.isSet(ScriptInstance::ENABLED) == enable) return;
 
 			inst.m_flags.set(ScriptInstance::ENABLED, enable);
+
+			setEnableProperty(entity, scr_index, inst, enable);
+
 			if(enable)
 			{
 				startScript(inst, false);
@@ -1794,6 +1863,7 @@ namespace Lumix
 		bool m_is_api_registered = false;
 		bool m_is_game_running = false;
 		GUIScene* m_gui_scene = nullptr;
+		AnimationScene* m_animation_scene;
 	};
 
 

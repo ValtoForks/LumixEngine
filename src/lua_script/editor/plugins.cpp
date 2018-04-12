@@ -1,3 +1,4 @@
+#include "animation/editor/animation_editor.h"
 #include "editor/asset_browser.h"
 #include "editor/ieditor_command.h"
 #include "editor/platform_interface.h"
@@ -591,7 +592,7 @@ struct AssetBrowserPlugin : AssetBrowser::IPlugin
 };
 
 
-struct ConsolePlugin LUMIX_FINAL : public StudioApp::IPlugin
+struct ConsolePlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 {
 	explicit ConsolePlugin(StudioApp& _app)
 		: app(_app)
@@ -603,6 +604,28 @@ struct ConsolePlugin LUMIX_FINAL : public StudioApp::IPlugin
 		action->is_selected.bind<ConsolePlugin, &ConsolePlugin::isOpen>(this);
 		app.addWindowAction(action);
 		buf[0] = '\0';
+	}
+
+
+	static const int LUA_CALL_EVENT_SIZE = 32;
+
+
+	void pluginAdded(GUIPlugin& plugin) override
+	{
+		if (!equalStrings(plugin.getName(), "animation_editor")) return;
+
+		auto& anim_editor = (AnimEditor::IAnimationEditor&)plugin;
+		auto& event_type = anim_editor.createEventType("lua_call");
+		event_type.size = LUA_CALL_EVENT_SIZE;
+		event_type.label = "Lua call";
+		event_type.editor.bind<ConsolePlugin, &ConsolePlugin::onLuaCallEventGUI>(this);
+	}
+
+
+	void onLuaCallEventGUI(u8* data, AnimEditor::Component& component) const
+	{
+		LuaScriptScene* scene = (LuaScriptScene*)app.getWorldEditor().getUniverse()->getScene(crc32("lua_script"));
+		ImGui::InputText("Function", (char*)data, LUA_CALL_EVENT_SIZE);
 	}
 
 
@@ -806,11 +829,6 @@ struct ConsolePlugin LUMIX_FINAL : public StudioApp::IPlugin
 };
 
 
-
-
-} // anonoymous namespace
-
-
 IEditorCommand* createAddLuaScriptCommand(WorldEditor& editor)
 {
 	return LUMIX_NEW(editor.getAllocator(), PropertyGridPlugin::AddLuaScriptCommand)(editor);
@@ -871,7 +889,7 @@ struct AddComponentPlugin LUMIX_FINAL : public StudioApp::IAddComponentPlugin
 			if (create_entity)
 			{
 				Entity entity = editor.addEntity();
-				editor.selectEntities(&entity, 1);
+				editor.selectEntities(&entity, 1, false);
 			}
 			if (editor.getSelectedEntities().empty()) return;
 			Entity entity = editor.getSelectedEntities()[0];
@@ -912,9 +930,9 @@ struct AddComponentPlugin LUMIX_FINAL : public StudioApp::IAddComponentPlugin
 };
 
 
-struct EditorPlugin : public WorldEditor::Plugin
+struct GizmoPlugin : public WorldEditor::Plugin
 {
-	explicit EditorPlugin(WorldEditor& _editor)
+	explicit GizmoPlugin(WorldEditor& _editor)
 		: editor(_editor)
 	{
 	}
@@ -943,26 +961,68 @@ struct EditorPlugin : public WorldEditor::Plugin
 };
 
 
+struct StudioAppPlugin : StudioApp::IPlugin
+{
+	StudioAppPlugin(StudioApp& app)
+		: m_app(app)
+	{
+		WorldEditor& editor = app.getWorldEditor();
+		IAllocator& allocator = editor.getAllocator();
+
+		m_add_component_plugin = LUMIX_NEW(allocator, AddComponentPlugin)(app);
+		app.registerComponent("lua_script", *m_add_component_plugin);
+
+		editor.registerEditorCommandCreator("add_script", createAddLuaScriptCommand);
+		editor.registerEditorCommandCreator("remove_script", createRemoveScriptCommand);
+		editor.registerEditorCommandCreator("set_script_property", createSetPropertyCommand);
+		m_gizmo_plugin = LUMIX_NEW(allocator, GizmoPlugin)(editor);
+		editor.addPlugin(*m_gizmo_plugin);
+
+		m_prop_grid_plugin = LUMIX_NEW(allocator, PropertyGridPlugin)(app);
+		app.getPropertyGrid().addPlugin(*m_prop_grid_plugin);
+
+		m_asset_browser_plugin = LUMIX_NEW(allocator, AssetBrowserPlugin)(app);
+		app.getAssetBrowser().addPlugin(*m_asset_browser_plugin);
+
+		m_console_plugin = LUMIX_NEW(allocator, ConsolePlugin)(app);
+		app.addPlugin(*m_console_plugin);
+	}
+
+
+	~StudioAppPlugin()
+	{
+		IAllocator& allocator = m_app.getWorldEditor().getAllocator();
+		
+		m_app.getWorldEditor().removePlugin(*m_gizmo_plugin);
+		LUMIX_DELETE(allocator, m_gizmo_plugin);
+		
+		m_app.getPropertyGrid().removePlugin(*m_prop_grid_plugin);
+		LUMIX_DELETE(allocator, m_prop_grid_plugin);
+
+		m_app.getAssetBrowser().removePlugin(*m_asset_browser_plugin);
+		LUMIX_DELETE(allocator, m_asset_browser_plugin);
+
+		m_app.removePlugin(*m_console_plugin);
+		LUMIX_DELETE(allocator, m_console_plugin);
+	}
+
+
+	StudioApp& m_app;
+	AddComponentPlugin* m_add_component_plugin;
+	GizmoPlugin* m_gizmo_plugin;
+	PropertyGridPlugin* m_prop_grid_plugin;
+	AssetBrowserPlugin* m_asset_browser_plugin;
+	ConsolePlugin* m_console_plugin;
+};
+
+
+} // anonymous namespace
+
+
 LUMIX_STUDIO_ENTRY(lua_script)
 {
-	WorldEditor& editor = app.getWorldEditor();
-	auto* cmp_plugin = LUMIX_NEW(editor.getAllocator(), AddComponentPlugin)(app);
-	app.registerComponent("lua_script", *cmp_plugin);
-
-	editor.registerEditorCommandCreator("add_script", createAddLuaScriptCommand);
-	editor.registerEditorCommandCreator("remove_script", createRemoveScriptCommand);
-	editor.registerEditorCommandCreator("set_script_property", createSetPropertyCommand);
-	auto* editor_plugin = LUMIX_NEW(editor.getAllocator(), EditorPlugin)(editor);
-	editor.addPlugin(*editor_plugin);
-
-	auto* plugin = LUMIX_NEW(editor.getAllocator(), PropertyGridPlugin)(app);
-	app.getPropertyGrid().addPlugin(*plugin);
-
-	auto* asset_browser_plugin = LUMIX_NEW(editor.getAllocator(), AssetBrowserPlugin)(app);
-	app.getAssetBrowser().addPlugin(*asset_browser_plugin);
-
-	auto* console_plugin = LUMIX_NEW(editor.getAllocator(), ConsolePlugin)(app);
-	app.addPlugin(*console_plugin);
+	IAllocator& allocator = app.getWorldEditor().getAllocator();
+	return LUMIX_NEW(allocator, StudioAppPlugin)(app);
 }
 
 

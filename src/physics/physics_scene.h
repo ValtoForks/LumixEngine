@@ -193,6 +193,8 @@ public:
 	virtual void setSphericalJointLimit(Entity entity, const Vec2& limit) = 0;
 
 	virtual void applyForceToActor(Entity entity, const Vec3& force) = 0;
+	virtual void applyImpulseToActor(Entity entity, const Vec3& force) = 0;
+	virtual Vec3 getActorVelocity(Entity entity) = 0;
 	virtual float getActorSpeed(Entity entity) = 0;
 	virtual void putToSleep(Entity entity) = 0;
 
@@ -204,6 +206,10 @@ public:
 	virtual void setControllerRadius(Entity entity, float radius) = 0;
 	virtual float getControllerHeight(Entity entity) = 0;
 	virtual void setControllerHeight(Entity entity, float height) = 0;
+	virtual bool getControllerCustomGravity(Entity entity) = 0;
+	virtual void setControllerCustomGravity(Entity entity, bool gravity) = 0;
+	virtual float getControllerCustomGravityAcceleration(Entity entity) = 0;
+	virtual void setControllerCustomGravityAcceleration(Entity entity, float gravityacceleration) = 0;
 	virtual bool isControllerTouchingDown(Entity entity) = 0;
 	virtual void resizeController(Entity entity, float height) = 0;
 
@@ -272,4 +278,4 @@ public:
 };
 
 
-} // !namespace Lumix
+} // namespace Lumix

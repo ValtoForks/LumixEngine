@@ -44,6 +44,11 @@ namespace Lumix
 				property("Layer", LUMIX_PROP(PhysicsScene, RagdollLayer))
 			),
 			component("sphere_rigid_actor",
+				functions(
+					function(LUMIX_FUNC(PhysicsScene::applyForceToActor)),
+					function(LUMIX_FUNC(PhysicsScene::applyImpulseToActor)),
+					function(LUMIX_FUNC(PhysicsScene::getActorVelocity))
+				),
 				property("Radius", LUMIX_PROP(PhysicsScene, SphereRadius),
 					MinAttribute(0)),
 				property("Layer", LUMIX_PROP(PhysicsScene, ActorLayer)),
@@ -51,6 +56,11 @@ namespace Lumix
 				property("Trigger", LUMIX_PROP(PhysicsScene, IsTrigger)) 
 			),
 			component("capsule_rigid_actor",
+				functions(
+					function(LUMIX_FUNC(PhysicsScene::applyForceToActor)),
+					function(LUMIX_FUNC(PhysicsScene::applyImpulseToActor)),
+					function(LUMIX_FUNC(PhysicsScene::getActorVelocity))
+				),
 				property("Radius", LUMIX_PROP(PhysicsScene, CapsuleRadius),
 					MinAttribute(0)),
 				property("Height", LUMIX_PROP(PhysicsScene, CapsuleHeight)),
@@ -114,7 +124,9 @@ namespace Lumix
 				),
 				property("Radius", LUMIX_PROP(PhysicsScene, ControllerRadius)),
 				property("Height", LUMIX_PROP(PhysicsScene, ControllerHeight)),
-				property("Layer", LUMIX_PROP(PhysicsScene, ControllerLayer))
+				property("Layer", LUMIX_PROP(PhysicsScene, ControllerLayer)),
+				property("Use Custom Gravity", LUMIX_PROP(PhysicsScene, ControllerCustomGravity)),
+				property("Custom Gravity Acceleration", LUMIX_PROP(PhysicsScene, ControllerCustomGravityAcceleration))
 			),
 			component("rigid_actor",
 				property("Layer", LUMIX_PROP(PhysicsScene, ActorLayer)),
@@ -135,12 +147,22 @@ namespace Lumix
 				)
 			),
 			component("box_rigid_actor",
+				functions(
+					function(LUMIX_FUNC(PhysicsScene::applyForceToActor)),
+					function(LUMIX_FUNC(PhysicsScene::applyImpulseToActor)),
+					function(LUMIX_FUNC(PhysicsScene::getActorVelocity))
+				),
 				property("Layer", LUMIX_PROP(PhysicsScene, ActorLayer)),
 				enum_property("Dynamic", LUMIX_PROP(PhysicsScene, DynamicType), dynamicTypeDesc),
 				property("Trigger", LUMIX_PROP(PhysicsScene, IsTrigger)),
 				property("Size", LUMIX_PROP(PhysicsScene, HalfExtents))
 			),
 			component("mesh_rigid_actor",
+				functions(
+					function(LUMIX_FUNC(PhysicsScene::applyForceToActor)),
+					function(LUMIX_FUNC(PhysicsScene::applyImpulseToActor)),
+					function(LUMIX_FUNC(PhysicsScene::getActorVelocity))
+				),
 				property("Layer", LUMIX_PROP(PhysicsScene, ActorLayer)),
 				enum_property("Dynamic", LUMIX_PROP(PhysicsScene, DynamicType), dynamicTypeDesc),
 				property("Source", LUMIX_PROP(PhysicsScene, ShapeSource),
