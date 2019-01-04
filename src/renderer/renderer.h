@@ -6,6 +6,7 @@
 
 namespace bgfx
 {
+	struct Encoder;
 	struct UniformHandle;
 	struct VertexDecl;
 }
@@ -31,6 +32,8 @@ class TextureManager;
 
 class LUMIX_RENDERER_API Renderer : public IPlugin 
 {
+	public:
+		enum { MAX_SHADER_DEFINES = 32 };
 	public:
 		virtual ~Renderer() {}
 		virtual void frame(bool capture) = 0;
@@ -58,6 +61,7 @@ class LUMIX_RENDERER_API Renderer : public IPlugin
 		virtual const char* getLayerName(int idx) const = 0;
 		virtual void setMainPipeline(Pipeline* pipeline) = 0;
 		virtual Pipeline* getMainPipeline() = 0;
+		virtual bgfx::Encoder* getEncoder() = 0;
 
 		virtual Engine& getEngine() = 0;
 }; 

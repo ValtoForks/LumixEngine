@@ -73,7 +73,7 @@ namespace Lumix
 
 
 static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("renderable");
-
+static thread_local bgfx::Encoder* s_encoder = nullptr;
 
 struct BoneProperty : Reflection::IEnumProperty
 {
@@ -230,7 +230,6 @@ static void registerProperties(IAllocator& allocator)
 			property("Enabled", LUMIX_PROP_FULL(RenderScene, isModelInstanceEnabled, enableModelInstance)),
 			property("Source", LUMIX_PROP(RenderScene, ModelInstancePath),
 				ResourceAttribute("Mesh (*.msh)", Model::TYPE)),
-			property("Keep skin", LUMIX_PROP(RenderScene, ModelInstanceKeepSkin)),
 			const_array("Materials", &RenderScene::getModelInstanceMaterialsCount, 
 				property("Source", LUMIX_PROP(RenderScene, ModelInstanceMaterial),
 					ResourceAttribute("Material (*.mat)", Material::TYPE))
@@ -485,6 +484,8 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 		, m_callback_stub(*this)
 		, m_vsync(true)
 		, m_main_pipeline(nullptr)
+		, m_encoder_list_mutex(false)
+		, m_encoders(m_allocator)
 	{
 		registerProperties(engine.getAllocator());
 		bgfx::PlatformData d;
@@ -516,7 +517,12 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 			}
 		}
 
-		bool res = bgfx::init(renderer_type, 0, 0, &m_callback_stub, &m_bgfx_allocator);
+		bgfx::Init init;
+		init.limits.maxEncoders = MT::getCPUsCount();
+		init.type = renderer_type;
+		init.callback = &m_callback_stub;
+		init.allocator = &m_bgfx_allocator;
+		bool res = bgfx::init(init);
 		ASSERT(res);
 		bgfx::reset(800, 600, m_vsync ? BGFX_RESET_VSYNC : 0);
 		bgfx::setDebug(BGFX_DEBUG_TEXT | BGFX_DEBUG_PROFILER);
@@ -569,8 +575,8 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 
 		bgfx::destroy(m_mat_color_uniform);
 		bgfx::destroy(m_roughness_metallic_emission_uniform);
-		bgfx::frame();
-		bgfx::frame();
+		frame(false);
+		frame(false);
 		bgfx::shutdown();
 	}
 
@@ -578,6 +584,18 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 	void setMainPipeline(Pipeline* pipeline) override
 	{
 		m_main_pipeline = pipeline;
+	}
+
+
+	bgfx::Encoder* getEncoder() override
+	{
+		if (s_encoder == nullptr)
+		{
+			s_encoder = bgfx::begin();
+			MT::SpinLock lock(m_encoder_list_mutex);
+			m_encoders.push(&s_encoder);
+		}
+		return s_encoder;
 	}
 
 
@@ -640,9 +658,13 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 		{
 			if (m_shader_defines[i] == define)
 			{
-				ASSERT(i < 256);
 				return i;
 			}
+		}
+
+		if (m_shader_defines.size() >= MAX_SHADER_DEFINES) {
+			ASSERT(false);
+			g_log_error.log("Renderer") << "Too many shader defines.";
 		}
 
 		m_shader_defines.emplace(define);
@@ -673,6 +695,15 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 	void frame(bool capture) override
 	{
 		PROFILE_FUNCTION();
+		{
+			MT::SpinLock lock(m_encoder_list_mutex);
+			for (bgfx::Encoder** encoder : m_encoders)
+			{
+				bgfx::end(*encoder);
+				*encoder = nullptr;
+			}
+			m_encoders.clear();
+		}
 		bgfx::frame(capture);
 		m_view_counter = 0;
 	}
@@ -704,6 +735,8 @@ struct RendererImpl LUMIX_FINAL : public Renderer
 	bgfx::UniformHandle m_mat_color_uniform;
 	bgfx::UniformHandle m_roughness_metallic_emission_uniform;
 	Pipeline* m_main_pipeline;
+	MT::SpinMutex m_encoder_list_mutex;
+	Array<bgfx::Encoder**> m_encoders;
 };
 
 

@@ -23,9 +23,6 @@ namespace Lumix
 {
 
 
-bool Model::force_keep_skin = false;
-
-
 Mesh::Mesh(Material* mat,
 	const bgfx::VertexDecl& vertex_decl,
 	const char* name,
@@ -33,7 +30,6 @@ Mesh::Mesh(Material* mat,
 	: name(name, allocator)
 	, vertex_decl(vertex_decl)
 	, material(mat)
-	, instance_idx(-1)
 	, indices(allocator)
 	, vertices(allocator)
 	, uvs(allocator)
@@ -51,7 +47,6 @@ void Mesh::set(const Mesh& rhs)
 	skin = rhs.skin;
 	flags = rhs.flags;
 	layer_mask = rhs.layer_mask;
-	instance_idx = rhs.instance_idx;
 	indices_count = rhs.indices_count;
 	vertex_decl = rhs.vertex_decl;
 	vertex_buffer_handle = rhs.vertex_buffer_handle;
@@ -103,7 +98,6 @@ Model::Model(const Path& path, ResourceManagerBase& resource_manager, Renderer& 
 	, m_first_nonroot_bone_index(0)
 	, m_renderer(renderer)
 {
-	if (force_keep_skin) m_loading_flags.set(LoadingFlags::KEEP_SKIN);
 	m_lods[0] = { 0, -1, FLT_MAX };
 	m_lods[1] = { 0, -1, FLT_MAX };
 	m_lods[2] = { 0, -1, FLT_MAX };
@@ -406,14 +400,6 @@ void Model::onBeforeReady()
 }
 
 
-void Model::setKeepSkin()
-{
-	if (m_loading_flags.isSet(LoadingFlags::KEEP_SKIN)) return;
-	m_loading_flags.set(LoadingFlags::KEEP_SKIN);
-	if (isReady()) m_resource_manager.reload(*this);
-}
-
-
 bool Model::parseBones(FS::IFile& file)
 {
 	int bone_count;
@@ -592,8 +578,7 @@ bool Model::parseMeshes(const bgfx::VertexDecl& global_vertex_decl, FS::IFile& f
 		int uv_attribute_offset = vertex_decl.getOffset(bgfx::Attrib::TexCoord0);
 		int weights_attribute_offset = vertex_decl.getOffset(bgfx::Attrib::Weight);
 		int bone_indices_attribute_offset = vertex_decl.getOffset(bgfx::Attrib::Indices);
-		bool keep_skin = m_loading_flags.isSet(LoadingFlags::KEEP_SKIN);
-		keep_skin = keep_skin && vertex_decl.has(bgfx::Attrib::Weight) && vertex_decl.has(bgfx::Attrib::Indices);
+		bool keep_skin = vertex_decl.has(bgfx::Attrib::Weight) && vertex_decl.has(bgfx::Attrib::Indices);
 
 		int vertex_size = mesh.vertex_decl.getStride();
 		int mesh_vertex_count = vertices_mem->size / mesh.vertex_decl.getStride();
@@ -734,8 +719,7 @@ bool Model::parseMeshesOld(bgfx::VertexDecl global_vertex_decl, FS::IFile& file,
 	int uv_attribute_offset = global_vertex_decl.getOffset(bgfx::Attrib::TexCoord0);
 	int weights_attribute_offset = global_vertex_decl.getOffset(bgfx::Attrib::Weight);
 	int bone_indices_attribute_offset = global_vertex_decl.getOffset(bgfx::Attrib::Indices);
-	bool keep_skin = m_loading_flags.isSet(LoadingFlags::KEEP_SKIN);
-	keep_skin = keep_skin && global_vertex_decl.has(bgfx::Attrib::Weight) && global_vertex_decl.has(bgfx::Attrib::Indices);
+	bool keep_skin = global_vertex_decl.has(bgfx::Attrib::Weight) && global_vertex_decl.has(bgfx::Attrib::Indices);
 	for (int i = 0; i < m_meshes.size(); ++i)
 	{
 		Offsets& offsets = mesh_offsets[i];

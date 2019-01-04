@@ -8,6 +8,7 @@
 #include "engine/resource_manager_base.h"
 #include "renderer/renderer.h"
 #include "renderer/shader_manager.h"
+#include "renderer/texture.h"
 #include <bgfx/bgfx.h>
 #include <lua.hpp>
 #include <lauxlib.h>
@@ -41,7 +42,7 @@ Shader::~Shader()
 
 bool Shader::hasDefine(u8 define_idx) const
 {
-	return (m_combintions.all_defines_mask & (1 << define_idx)) != 0;
+	return (m_combinations.all_defines_mask & (1 << define_idx)) != 0;
 }
 
 
@@ -61,12 +62,6 @@ ShaderInstance& Shader::getInstance(u32 mask)
 }
 
 
-ShaderCombinations::ShaderCombinations()
-{
-	setMemory(this, 0, sizeof(*this));
-}
-
-
 Renderer& Shader::getRenderer()
 {
 	return static_cast<ShaderManager&>(m_resource_manager).getRenderer();
@@ -76,13 +71,13 @@ Renderer& Shader::getRenderer()
 static u32 getDefineMaskFromDense(const Shader& shader, u32 dense)
 {
 	u32 mask = 0;
-	int defines_count = Math::minimum(lengthOf(shader.m_combintions.defines), int(sizeof(dense) * 8));
+	int defines_count = Math::minimum(lengthOf(shader.m_combinations.defines), int(sizeof(dense) * 8));
 
 	for (int i = 0; i < defines_count; ++i)
 	{
 		if (dense & (1 << i))
 		{
-			mask |= 1 << shader.m_combintions.defines[i];
+			mask |= 1 << shader.m_combinations.defines[i];
 		}
 	}
 	return mask;
@@ -95,7 +90,7 @@ bool Shader::generateInstances()
 		bgfx::getRendererType() == bgfx::RendererType::OpenGLES;
 	m_instances.clear();
 
-	u32 count = 1 << m_combintions.define_count;
+	u32 count = 1 << m_combinations.define_count;
 
 	auto* binary_manager = m_resource_manager.getOwner().get(ShaderBinary::TYPE);
 	char basename[MAX_PATH_LENGTH];
@@ -109,11 +104,11 @@ bool Shader::generateInstances()
 		instance.define_mask = getDefineMaskFromDense(*this, mask);
 		m_all_defines_mask |= instance.define_mask;
 
-		for (int pass_idx = 0; pass_idx < m_combintions.pass_count; ++pass_idx)
+		for (int pass_idx = 0; pass_idx < m_combinations.pass_count; ++pass_idx)
 		{
-			const char* pass = m_combintions.passes[pass_idx];
+			const char* pass = m_combinations.passes[pass_idx];
 			StaticString<MAX_PATH_LENGTH> path("pipelines/compiled", is_opengl ? "_gl/" : "/");
-			int actual_mask = mask & m_combintions.vs_local_mask[pass_idx];
+			int actual_mask = mask & m_combinations.vs_local_mask[pass_idx];
 			path << basename << "_" << pass << actual_mask << "_vs.shb";
 
 			Path vs_path(path);
@@ -123,7 +118,7 @@ bool Shader::generateInstances()
 			instance.binaries[pass_idx * 2] = vs_binary;
 
 			path.data[0] = '\0';
-			actual_mask = mask & m_combintions.fs_local_mask[pass_idx];
+			actual_mask = mask & m_combinations.fs_local_mask[pass_idx];
 			path << "pipelines/compiled" << (is_opengl ? "_gl/" : "/") << basename;
 			path << "_" << pass << actual_mask << "_fs.shb";
 
@@ -145,18 +140,6 @@ static void registerCFunction(lua_State* L, const char* name, lua_CFunction func
 }
 
 
-static ShaderCombinations* getCombinations(lua_State* L)
-{
-	ShaderCombinations* ret = nullptr;
-	if (lua_getglobal(L, "this") == LUA_TLIGHTUSERDATA)
-	{
-		ret = LuaWrapper::toType<ShaderCombinations*>(L, -1);
-	}
-	lua_pop(L, 1);
-	return ret;
-}
-
-
 static Shader* getShader(lua_State* L)
 {
 	Shader* ret = nullptr;
@@ -169,11 +152,40 @@ static Shader* getShader(lua_State* L)
 }
 
 
+static ShaderCombinations& getShaderCombinations(lua_State* L)
+{
+	ShaderCombinations* ret = nullptr;
+	int res = lua_getglobal(L, "combinations");
+	ASSERT(res == LUA_TLIGHTUSERDATA);
+	return *LuaWrapper::toType<ShaderCombinations*>(L, -1);
+}
+
+
+static Renderer& getRendererGlobal(lua_State* L)
+{
+	Renderer* ret = nullptr;
+	int res = lua_getglobal(L, "renderer");
+	ASSERT(res == LUA_TLIGHTUSERDATA);
+	return *LuaWrapper::toType<Renderer*>(L, -1);
+}
+
+
+static void default_texture(lua_State* state, const char* path)
+{
+	Shader* shader = getShader(state);
+	if (!shader) return;
+	if (shader->m_texture_slot_count == 0) return;
+	Shader::TextureSlot& slot = shader->m_texture_slots[shader->m_texture_slot_count - 1];
+	ResourceManagerBase* texture_manager = shader->getResourceManager().getOwner().get(Texture::TYPE);
+	slot.default_texture = (Texture*)texture_manager->load(Path(path));
+}
+
+
 static void texture_slot(lua_State* state, const char* name, const char* uniform)
 {
-	auto* shader = getShader(state);
+	Shader* shader = getShader(state);
 	if (!shader) return;
-	auto& slot = shader->m_texture_slots[shader->m_texture_slot_count];
+	Shader::TextureSlot& slot = shader->m_texture_slots[shader->m_texture_slot_count];
 	copyString(slot.name, name);
 	slot.uniform_handle = bgfx::createUniform(uniform, bgfx::UniformType::Int1);
 	copyString(slot.uniform, uniform);
@@ -181,32 +193,14 @@ static void texture_slot(lua_State* state, const char* name, const char* uniform
 }
 
 
-static Renderer* getRendererGlobal(lua_State* L)
-{
-	Renderer* renderer = nullptr;
-	if (lua_getglobal(L, "renderer") == LUA_TLIGHTUSERDATA)
-	{
-		renderer = LuaWrapper::toType<Renderer*>(L, -1);
-	}
-	lua_pop(L, 1);
-
-	if (!renderer)
-	{
-		g_log_error.log("Renderer") << "Error executing function texture_define, missing renderer global variable";
-	}
-	return renderer;
-}
-
-
 static void texture_define(lua_State* L, const char* define)
 {
-	auto* shader = getShader(L);
+	Shader* shader = getShader(L);
 	if (!shader) return;
-	Renderer* renderer = getRendererGlobal(L);
-	if (!renderer) return;
+	Renderer& renderer = shader->getRenderer();
 
 	auto& slot = shader->m_texture_slots[shader->m_texture_slot_count - 1];
-	slot.define_idx = renderer->getShaderDefineIdx(lua_tostring(L, -1));
+	slot.define_idx = renderer.getShaderDefineIdx(lua_tostring(L, -1));
 }
 
 
@@ -247,6 +241,11 @@ static void uniform(lua_State* L, const char* name, const char* type)
 		u.type = Shader::Uniform::VEC3;
 		u.handle = bgfx::createUniform(name, bgfx::UniformType::Vec4);
 	}
+	else if (equalStrings(type, "vec4"))
+	{
+		u.type = Shader::Uniform::VEC4;
+		u.handle = bgfx::createUniform(name, bgfx::UniformType::Vec4);
+	}
 	else if (equalStrings(type, "vec2"))
 	{
 		u.type = Shader::Uniform::VEC2;
@@ -261,23 +260,28 @@ static void uniform(lua_State* L, const char* name, const char* type)
 
 static void pass(lua_State* state, const char* name)
 {
-	auto* cmb = getCombinations(state);
-	copyString(cmb->passes[cmb->pass_count].data, name);
-	cmb->vs_local_mask[cmb->pass_count] = 0;
-	cmb->fs_local_mask[cmb->pass_count] = 0;
-	++cmb->pass_count;
+	ShaderCombinations& cmb = getShaderCombinations(state);
+	if (cmb.pass_count >= lengthOf(cmb.vs_local_mask)) {
+		g_log_error.log("Renderer") << "Too many passes in shader. Pass '" << name << "' is ignored.";
+		return;
+	}
+
+	copyString(cmb.passes[cmb.pass_count].data, name);
+	cmb.vs_local_mask[cmb.pass_count] = 0;
+	cmb.fs_local_mask[cmb.pass_count] = 0;
+	++cmb.pass_count;
 }
 
 
-static int indexOf(ShaderCombinations& combination, u8 define_idx)
+static int indexOfDefine(ShaderCombinations& combination, u8 define_idx)
 {
-	for (int i = 0; i < combination.define_count; ++i)
-	{
-		if (combination.defines[i] == define_idx)
-		{
+	for (int i = 0; i < combination.define_count; ++i) {
+		if (combination.defines[i] == define_idx) {
 			return i;
 		}
 	}
+
+	if (combination.define_count >= lengthOf(combination.defines)) return -1;
 
 	combination.defines[combination.define_count] = define_idx;
 	++combination.define_count;
@@ -315,7 +319,7 @@ static void depth_test(lua_State* L, bool enabled)
 	if (!shader) return;
 	if (enabled)
 	{
-		shader->m_render_states |= BGFX_STATE_DEPTH_TEST_LEQUAL;
+		shader->m_render_states |= BGFX_STATE_DEPTH_TEST_GEQUAL;
 	}
 	else
 	{
@@ -326,20 +330,27 @@ static void depth_test(lua_State* L, bool enabled)
 
 static void fs(lua_State* L)
 {
-	auto* cmb = getCombinations(L);
-	Renderer* renderer = getRendererGlobal(L);
-	if (!renderer) return;
+	Shader* shader = getShader(L);
+	ShaderCombinations& cmb = getShaderCombinations(L);
+	Renderer& renderer = getRendererGlobal(L);
 
 	LuaWrapper::checkTableArg(L, 1);
-	int len = (int)lua_rawlen(L, 1);
-	for (int i = 0; i < len; ++i)
-	{
-		if (lua_rawgeti(L, 1, i + 1) == LUA_TSTRING)
-		{
+	const int len = (int)lua_rawlen(L, 1);
+	
+	for (int i = 0; i < len; ++i) {
+		if (lua_rawgeti(L, 1, i + 1) == LUA_TSTRING) {
 			const char* tmp = lua_tostring(L, -1);
-			int define_idx = renderer->getShaderDefineIdx(tmp);
-			cmb->all_defines_mask |= 1 << define_idx;
-			cmb->fs_local_mask[cmb->pass_count - 1] |= 1 << indexOf(*cmb, define_idx);
+			const int define_idx = renderer.getShaderDefineIdx(tmp);
+			cmb.all_defines_mask |= 1 << define_idx;
+			const int cmb_define_idx = indexOfDefine(cmb, define_idx);
+			if (cmb_define_idx >= 0) {
+				cmb.fs_local_mask[cmb.pass_count - 1] |= 1 << cmb_define_idx;
+			}
+			else {
+				const char* pass_name = cmb.passes[cmb.pass_count - 1];
+				const char* shader_path = shader ? shader->getPath().c_str() : "unknown";
+				g_log_error.log("Renderer") << "Too many defines in pass " << pass_name << " in shader " << shader_path;
+			}
 		}
 		lua_pop(L, 1);
 	}
@@ -348,9 +359,9 @@ static void fs(lua_State* L)
 
 static void vs(lua_State* L)
 {
-	auto* cmb = getCombinations(L);
-	Renderer* renderer = getRendererGlobal(L);
-	if (!renderer) return;
+	Shader* shader = getShader(L);
+	ShaderCombinations& cmb = getShaderCombinations(L);
+	Renderer& renderer = getRendererGlobal(L);
 
 	LuaWrapper::checkTableArg(L, 1);
 	int len = (int)lua_rawlen(L, 1);
@@ -359,9 +370,9 @@ static void vs(lua_State* L)
 		if (lua_rawgeti(L, 1, i + 1) == LUA_TSTRING)
 		{
 			const char* tmp = lua_tostring(L, -1);
-			int define_idx = renderer->getShaderDefineIdx(tmp);
-			cmb->all_defines_mask |= 1 << define_idx;
-			cmb->vs_local_mask[cmb->pass_count - 1] |= 1 << indexOf(*cmb, define_idx);
+			int define_idx = renderer.getShaderDefineIdx(tmp);
+			cmb.all_defines_mask |= 1 << define_idx;
+			cmb.vs_local_mask[cmb.pass_count - 1] |= 1 << indexOfDefine(cmb, define_idx);
 		}
 		lua_pop(L, 1);
 	}
@@ -370,17 +381,18 @@ static void vs(lua_State* L)
 
 static void registerFunctions(Shader* shader, ShaderCombinations* combinations, Renderer* renderer, lua_State* L)
 {
-	lua_pushlightuserdata(L, combinations);
-	lua_setglobal(L, "this");
-	lua_pushlightuserdata(L, renderer);
-	lua_setglobal(L, "renderer");
 	lua_pushlightuserdata(L, shader);
 	lua_setglobal(L, "shader");
+	lua_pushlightuserdata(L, combinations);
+	lua_setglobal(L, "combinations");
+	lua_pushlightuserdata(L, renderer);
+	lua_setglobal(L, "renderer");
 	registerCFunction(L, "pass", &LuaWrapper::wrap<decltype(&pass), pass>);
 	registerCFunction(L, "fs", &LuaWrapper::wrap<decltype(&fs), fs>);
 	registerCFunction(L, "vs", &LuaWrapper::wrap<decltype(&vs), vs>);
 	registerCFunction(L, "depth_test", &LuaWrapper::wrap<decltype(&depth_test), depth_test>);
 	registerCFunction(L, "alpha_blending", &LuaWrapper::wrap<decltype(&alpha_blending), alpha_blending>);
+	registerCFunction(L, "default_texture", &LuaWrapper::wrap<decltype(&default_texture), default_texture>);
 	registerCFunction(L, "texture_slot", &LuaWrapper::wrap<decltype(&texture_slot), texture_slot>);
 	registerCFunction(L, "texture_define", &LuaWrapper::wrap<decltype(&texture_define), texture_define>);
 	registerCFunction(L, "uniform", &LuaWrapper::wrap<decltype(&uniform), uniform>);
@@ -391,8 +403,8 @@ bool Shader::load(FS::IFile& file)
 {
 	lua_State* L = luaL_newstate();
 	luaL_openlibs(L);
-	registerFunctions(this, &m_combintions, &getRenderer(), L);
-	m_render_states = BGFX_STATE_DEPTH_TEST_LEQUAL;
+	registerFunctions(this, &m_combinations, &getRenderer(), L);
+	m_render_states = BGFX_STATE_DEPTH_TEST_GEQUAL;
 
 	bool errors = luaL_loadbuffer(L, (const char*)file.getBuffer(), file.size(), "") != LUA_OK;
 	errors = errors || lua_pcall(L, 0, 0, 0) != LUA_OK;
@@ -417,7 +429,9 @@ bool Shader::load(FS::IFile& file)
 
 void Shader::unload()
 {
-	m_combintions = {};
+	m_combinations.pass_count = 0;
+	m_combinations.define_count = 0;
+	m_combinations.all_defines_mask = 0;
 
 	for (auto& uniform : m_uniforms)
 	{
@@ -431,6 +445,13 @@ void Shader::unload()
 		{
 			bgfx::destroy(m_texture_slots[i].uniform_handle);
 		}
+		if (m_texture_slots[i].default_texture)
+		{
+			Texture* t = m_texture_slots[i].default_texture;
+			t->getResourceManager().unload(*t);
+			m_texture_slots[i].default_texture = nullptr;
+		}
+
 		m_texture_slots[i].uniform_handle = BGFX_INVALID_HANDLE;
 	}
 	m_texture_slot_count = 0;
@@ -446,9 +467,9 @@ bgfx::ProgramHandle ShaderInstance::getProgramHandle(int pass_idx)
 {
 	if (!bgfx::isValid(program_handles[pass_idx]))
 	{
-		for (int i = 0; i < lengthOf(shader.m_combintions.passes); ++i)
+		for (int i = 0; i < lengthOf(shader.m_combinations.passes); ++i)
 		{
-			auto& pass = shader.m_combintions.passes[i];
+			auto& pass = shader.m_combinations.passes[i];
 			int global_idx = shader.getRenderer().getPassIdx(pass);
 			if (global_idx == pass_idx)
 			{

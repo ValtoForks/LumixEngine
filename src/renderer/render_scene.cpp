@@ -708,12 +708,6 @@ public:
 	}
 
 
-	static bool keepSkin(ModelInstance& r)
-	{
-		return r.flags.isSet(ModelInstance::KEEP_SKIN);
-	}
-
-
 	static bool hasCustomMeshes(ModelInstance& r)
 	{
 		return r.flags.isSet(ModelInstance::CUSTOM_MESHES);
@@ -992,8 +986,8 @@ public:
 			Vec3 up = rot.rotate({ 0, -1, 0 }) * scale;
 			if (text.m_flags.isSet(TextMesh::CAMERA_ORIENTED))
 			{
-				right = cam_right;
-				up = cam_up;
+				right = cam_right * scale;
+				up = cam_up * scale;
 			}
 			u32 color = text.color;
 			Vec2 text_size = font->CalcTextSizeA((float)text.getFontSize(), FLT_MAX, 0, str);
@@ -2672,7 +2666,7 @@ public:
 
 	ModelInstance* getModelInstances() override
 	{
-		return &m_model_instances[0];
+		return m_model_instances.empty() ? nullptr : &m_model_instances[0];
 	}
 
 
@@ -3620,6 +3614,7 @@ public:
 					MeshInstance* end = begin + subinfos.size();
 
 					auto cmp = [](const MeshInstance& a, const MeshInstance& b) -> bool {
+						if (a.mesh != b.mesh) return a.mesh < b.mesh;
 						return (a.depth < b.depth);
 					};
 					std::sort(begin, end, cmp);
@@ -3679,11 +3674,12 @@ public:
 				camera.ortho_size,
 				camera.near,
 				camera.far,
-				is_homogenous_depth);
+				is_homogenous_depth,
+				true);
 		}
 		else
 		{
-			mtx.setPerspective(camera.fov, ratio, camera.near, camera.far, is_homogenous_depth);
+			mtx.setPerspective(camera.fov, ratio, camera.near, camera.far, is_homogenous_depth, true);
 		}
 		return mtx;
 	}
@@ -4267,6 +4263,7 @@ public:
 			{
 				terrain_hit.m_component_type = TERRAIN_TYPE;
 				terrain_hit.m_entity = terrain->getEntity();
+				terrain_hit.m_mesh = nullptr;
 				hit = terrain_hit;
 			}
 		}
@@ -4800,20 +4797,6 @@ public:
 	}
 
 
-	bool getModelInstanceKeepSkin(Entity entity) override
-	{
-		auto& r = m_model_instances[entity.index];
-		return keepSkin(r);
-	}
-
-
-	void setModelInstanceKeepSkin(Entity entity, bool keep) override
-	{
-		auto& r = m_model_instances[entity.index];
-		r.flags.set(ModelInstance::KEEP_SKIN, keep);
-	}
-
-
 	void setModelInstanceMaterial(Entity entity, int index, const Path& path) override
 	{
 		auto& r = m_model_instances[entity.index];
@@ -4826,7 +4809,11 @@ public:
 		allocateCustomMeshes(r, new_count);
 		ASSERT(r.meshes);
 
-		auto* new_material = static_cast<Material*>(material_manager->load(path));
+		Material* new_material = static_cast<Material*>(material_manager->load(path));
+
+		const int skinned_define_idx = m_renderer.getShaderDefineIdx("SKINNED");
+		new_material->setDefine(skinned_define_idx, !r.meshes[index].skin.empty());
+
 		r.meshes[index].setMaterial(new_material, *r.model, m_renderer);
 	}
 
@@ -4876,7 +4863,6 @@ public:
 		model_instance.pose = nullptr;
 		if (model)
 		{
-			if (keepSkin(model_instance)) model->setKeepSkin();
 			ModelLoadedCallback& callback = getModelLoadedCallback(model);
 			++callback.m_ref_count;
 

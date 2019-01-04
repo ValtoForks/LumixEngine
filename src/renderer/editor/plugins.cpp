@@ -253,6 +253,12 @@ struct MaterialPlugin LUMIX_FINAL : public AssetBrowser::IPlugin
 							material->createCommandBuffer();
 						}
 						break;
+					case Shader::Uniform::VEC4:
+						if (ImGui::DragFloat4(shader_uniform.name, uniform.vec4))
+						{
+							material->createCommandBuffer();
+						}
+						break;
 					case Shader::Uniform::VEC2:
 						if (ImGui::DragFloat2(shader_uniform.name, uniform.vec2))
 						{
@@ -1108,6 +1114,7 @@ struct ShaderPlugin LUMIX_FINAL : public AssetBrowser::IPlugin
 					case Shader::Uniform::INT: ImGui::Text("int"); break;
 					case Shader::Uniform::MATRIX4: ImGui::Text("Matrix 4x4"); break;
 					case Shader::Uniform::TIME: ImGui::Text("time"); break;
+					case Shader::Uniform::VEC4: ImGui::Text("Vector4"); break;
 					case Shader::Uniform::VEC3: ImGui::Text("Vector3"); break;
 					case Shader::Uniform::VEC2: ImGui::Text("Vector2"); break;
 					default: ASSERT(false); break;
@@ -2381,7 +2388,7 @@ struct RenderInterfaceImpl LUMIX_FINAL : public RenderInterface
 		copyMemory(vertex_buffer.data, vertices, vertices_count * renderer.getBasicVertexDecl().getStride());
 		copyMemory(index_buffer.data, indices, indices_count * sizeof(u16));
 
-		u64 flags = BGFX_STATE_DEPTH_TEST_LEQUAL;
+		u64 flags = m_shader->m_render_states;
 		if (lines) flags |= BGFX_STATE_PT_LINES;
 		m_pipeline.render(vertex_buffer,
 			index_buffer,
@@ -2607,7 +2614,7 @@ struct EditorUIRenderPlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 		float height = ImGui::GetIO().DisplaySize.y;
 		float bottom = height + top;
 		Matrix ortho;
-		ortho.setOrtho(left, right, bottom, top, -1.0f, 1.0f, bgfx::getCaps()->homogeneousDepth);
+		ortho.setOrtho(left, right, bottom, top, -1.0f, 1.0f, bgfx::getCaps()->homogeneousDepth, true);
 		if (framebuffer && (framebuffer->getWidth() != int(width + 0.5f) || framebuffer->getHeight() != int(height + 0.5f)))
 		{
 			framebuffer->resize((int)width, (int)height);
@@ -2703,7 +2710,7 @@ struct EditorUIRenderPlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 			
 			ShaderInstance& shader_instance = material->getShaderInstance();
 			bgfx::setStencil(BGFX_STENCIL_NONE, BGFX_STENCIL_NONE);
-			bgfx::setState(BGFX_STATE_RGB_WRITE | BGFX_STATE_ALPHA_WRITE | BGFX_STATE_DEPTH_WRITE | render_states);
+			bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z | render_states);
 			bgfx::setVertexBuffer(0, m_vertex_buffer, m_vb_offset, num_vertices);
 			u32 first_index = elem_offset + m_ib_offset;
 			bgfx::setIndexBuffer(m_index_buffer, first_index, pcmd->ElemCount);
@@ -2999,8 +3006,6 @@ struct StudioAppPlugin : StudioApp::IPlugin
 		: m_app(app)
 	{
 		IAllocator& allocator = app.getWorldEditor().getAllocator();
-
-		Model::force_keep_skin = true;
 
 		app.registerComponent("camera", "Render/Camera");
 		app.registerComponent("global_light", "Render/Global light");

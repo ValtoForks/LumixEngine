@@ -19,6 +19,7 @@ struct IFile;
 class Renderer;
 class Shader;
 class ShaderBinary;
+class Texture;
 
 
 struct ShaderInstance
@@ -45,19 +46,17 @@ struct ShaderInstance
 
 struct LUMIX_RENDERER_API ShaderCombinations
 {
-	ShaderCombinations();
-
 	typedef StaticString<32> Pass;
 	typedef u8 Defines[16];
 	typedef Pass Passes[32];
 
-	int pass_count;
-	int define_count;
+	int pass_count = 0;
+	int define_count = 0;
 	int vs_local_mask[32];
 	int fs_local_mask[32];
 	Defines defines;
 	Passes passes;
-	u32 all_defines_mask;
+	u32 all_defines_mask = 0;
 };
 
 
@@ -95,12 +94,14 @@ public:
 			name[0] = uniform[0] = '\0';
 			define_idx = -1;
 			uniform_handle = BGFX_INVALID_HANDLE;
+			default_texture = nullptr;
 		}
 
 		char name[30];
 		char uniform[30];
 		int define_idx;
 		bgfx::UniformHandle uniform_handle;
+		Texture* default_texture;
 	};
 
 
@@ -114,7 +115,8 @@ public:
 			TIME,
 			COLOR,
 			VEC2,
-			VEC3
+			VEC3,
+			VEC4
 		};
 
 		char name[32];
@@ -147,7 +149,7 @@ public:
 	IAllocator& m_allocator;
 	Array<ShaderInstance> m_instances;
 	u32 m_all_defines_mask;
-	ShaderCombinations m_combintions;
+	ShaderCombinations m_combinations;
 	u64 m_render_states;
 	TextureSlot m_texture_slots[MAX_TEXTURE_SLOT_COUNT];
 	int m_texture_slot_count;
